@@ -1,10 +1,10 @@
-import { useState, useEffect, useMemo } from "react";
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
+import { useState, useEffect, useMemo, useRef } from "react";
+import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import {
   Search, Swords, TrendingUp, TrendingDown, Loader2, Info,
   ChevronDown, ArrowUpDown, ZoomIn, ZoomOut, RotateCcw,
   IdCard, Network, Table2, Crown, Star, X, Plus, Users, Sparkles,
-  Home, Menu, ArrowRight, ShoppingBag, BarChart3,
+  Home, Menu, ArrowRight, ShoppingBag, BarChart3, User, MessageCircleQuestion,
 } from "lucide-react";
 
 /* ---------- shared design tokens ---------- */
@@ -69,12 +69,12 @@ function counterScore(winRate) {
 
 const CACHE_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
 
-function readLocalCache(key) {
+function readLocalCache(key, ttlMs = CACHE_TTL_MS) {
   try {
     const raw = localStorage.getItem(key);
     if (!raw) return null;
     const { ts, data } = JSON.parse(raw);
-    if (Date.now() - ts > CACHE_TTL_MS) return null;
+    if (Date.now() - ts > ttlMs) return null;
     return data;
   } catch {
     return null;
@@ -284,6 +284,63 @@ async function getPatchWinRate(heroId) {
   return { ...data, patchName: patch.name };
 }
 
+/* ---------- experimental: global monthly win-rate trend for a hero (via Explorer SQL) ---------- */
+
+async function getHeroMonthlyTrend(heroId) {
+  const cacheKey = `dw_monthly_${heroId}`;
+  const cached = readLocalCache(cacheKey, PLAYER_TTL_MS * 4); // ~1h, this data doesn't need to be ultra-fresh
+  if (cached) return cached;
+
+  const sql = `
+    SELECT
+      date_trunc('month', to_timestamp(start_time)) AS month,
+      COUNT(*) AS games,
+      SUM(CASE WHEN
+        (radiant_win AND ${heroId} = ANY(string_to_array(radiant_team, ',')::int[]))
+        OR (NOT radiant_win AND ${heroId} = ANY(string_to_array(dire_team, ',')::int[]))
+      THEN 1 ELSE 0 END) AS wins
+    FROM public_matches
+    WHERE start_time >= extract(epoch FROM now() - interval '6 months')
+    AND (${heroId} = ANY(string_to_array(radiant_team, ',')::int[]) OR ${heroId} = ANY(string_to_array(dire_team, ',')::int[]))
+    GROUP BY month
+    ORDER BY month ASC
+  `.replace(/\s+/g, " ").trim();
+
+  const r = await fetch(`https://api.opendota.com/api/explorer?sql=${encodeURIComponent(sql)}`);
+  if (!r.ok) throw new Error("network");
+  const json = await r.json();
+  const rows = (json.rows || []).map((row) => {
+    const d = new Date(row.month);
+    return {
+      label: `${MONTH_RU[d.getUTCMonth()]} ${String(d.getUTCFullYear()).slice(2)}`,
+      games: Number(row.games) || 0,
+      winRate: Number(row.games) > 0 ? Math.round((Number(row.wins) / Number(row.games)) * 1000) / 10 : 0,
+    };
+  });
+  writeLocalCache(cacheKey, rows);
+  return rows;
+}
+
+function useHeroMonthlyTrend(heroId) {
+  const [state, setState] = useState({ loading: false, rows: null, error: null });
+  useEffect(() => {
+    if (!heroId) return;
+    let cancelled = false;
+    setState({ loading: true, rows: null, error: null });
+    getHeroMonthlyTrend(heroId)
+      .then((rows) => {
+        if (!cancelled) setState({ loading: false, rows, error: null });
+      })
+      .catch(() => {
+        if (!cancelled) setState({ loading: false, rows: null, error: "unavailable" });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [heroId]);
+  return state;
+}
+
 function usePatchWinRate(heroId) {
   const [state, setState] = useState({ loading: false, data: null, error: null });
   useEffect(() => {
@@ -305,6 +362,76 @@ function usePatchWinRate(heroId) {
   return state;
 }
 
+/* ---------- personal profile (public OpenDota player data, Steam32 account id — no login needed) ---------- */
+
+function steam64To32(id64str) {
+  try {
+    const id64 = BigInt(id64str);
+    const base = 76561197960265728n;
+    if (id64 < base) return null;
+    return (id64 - base).toString();
+  } catch {
+    return null;
+  }
+}
+
+function parseSteamAccountId(raw) {
+  const trimmed = (raw || "").trim();
+  const profileMatch = trimmed.match(/\/profiles\/(\d{17})/);
+  if (profileMatch) return steam64To32(profileMatch[1]);
+  if (/^\d{17}$/.test(trimmed)) return steam64To32(trimmed);
+  if (/^\d+$/.test(trimmed)) return trimmed;
+  return null;
+}
+
+const PLAYER_TTL_MS = 15 * 60 * 1000; // 15 minutes — personal data changes often
+
+async function fetchPlayerBundle(accountId) {
+  const cacheKey = `dw_player_${accountId}`;
+  const cached = readLocalCache(cacheKey, PLAYER_TTL_MS);
+  if (cached) return cached;
+
+  const [profileRes, wlRes, heroesRes, matchesRes] = await Promise.all([
+    fetch(`https://api.opendota.com/api/players/${accountId}`),
+    fetch(`https://api.opendota.com/api/players/${accountId}/wl`),
+    fetch(`https://api.opendota.com/api/players/${accountId}/heroes`),
+    fetch(`https://api.opendota.com/api/players/${accountId}/matches?limit=300`),
+  ]);
+  if (!profileRes.ok || !wlRes.ok || !heroesRes.ok || !matchesRes.ok) throw new Error("network");
+
+  const profile = await profileRes.json();
+  const wl = await wlRes.json();
+  const heroesPlayed = await heroesRes.json();
+  const matches = await matchesRes.json();
+
+  const data = { profile, wl, heroesPlayed, matches };
+  writeLocalCache(cacheKey, data);
+  return data;
+}
+
+function usePlayerBundle(accountId) {
+  const [state, setState] = useState({ loading: false, data: null, error: null });
+  useEffect(() => {
+    if (!accountId) {
+      setState({ loading: false, data: null, error: null });
+      return;
+    }
+    let cancelled = false;
+    setState({ loading: true, data: null, error: null });
+    fetchPlayerBundle(accountId)
+      .then((data) => {
+        if (!cancelled) setState({ loading: false, data, error: null });
+      })
+      .catch(() => {
+        if (!cancelled) setState({ loading: false, data: null, error: "Не удалось загрузить профиль. Проверь ID или настройки приватности матчей в Dota 2." });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [accountId]);
+  return state;
+}
+
 /* ---------- root app ---------- */
 
 const TABS = [
@@ -314,13 +441,20 @@ const TABS = [
   { key: "web", label: "Паутина", icon: Network },
   { key: "roles", label: "Топ по ролям", icon: Crown },
   { key: "draft", label: "Драфт 5×5", icon: Users },
+  { key: "profile", label: "Мой профиль", icon: User },
 ];
 
 export default function App() {
   const [heroes, setHeroes] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [tab, setTab] = useState("home");
+  const [steamIdFromUrl] = useState(() => {
+    if (typeof window === "undefined") return null;
+    const id = new URLSearchParams(window.location.search).get("steamid");
+    if (id) window.history.replaceState({}, "", window.location.pathname);
+    return id;
+  });
+  const [tab, setTab] = useState(() => (steamIdFromUrl ? "profile" : "home"));
   const [selectedId, setSelectedId] = useState(null);
 
   useEffect(() => {
@@ -376,6 +510,12 @@ export default function App() {
         .edge-line { transition: opacity 0.25s ease, stroke-width 0.25s ease; }
         .spin { animation: spin 1s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes fadeInUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+        .tab-content { animation: fadeInUp 0.25s ease; }
+        .role-row, .matchup-row, .side-row { transition: background 0.12s ease; border-radius: 6px; }
+        .role-row:hover, .side-row:hover { background: #17102A; }
+        .hero-chip:hover { background: #17102A !important; }
+        .panel, .card { transition: border-color 0.15s ease; }
         @keyframes floatHero {
           0%, 100% { transform: translateY(0); }
           50% { transform: translateY(-14px); }
@@ -384,7 +524,7 @@ export default function App() {
           0%, 100% { opacity: 0.6; transform: translateX(-50%) scale(1); }
           50% { opacity: 1; transform: translateX(-50%) scale(1.1); }
         }
-        .home-card:hover { transform: translateY(-3px); box-shadow: 0 0 40px rgba(178,75,243,0.25) !important; }
+        .home-card:hover { transform: translateY(-3px); box-shadow: 0 0 40px rgba(178,75,243,0.25) !important; border-color: #B24BF3 !important; }
         .home-text-col { text-align: left; }
         @media (max-width: 860px) {
           .layout-cols { grid-template-columns: 1fr !important; }
@@ -417,7 +557,7 @@ export default function App() {
       {error && <div style={styles.errorBox}>{error}</div>}
 
       {!loading && !error && selected && (
-        <>
+        <div key={tab} className="tab-content">
           {tab === "home" && <HomeTab heroes={heroes} setTab={setTab} />}
           {tab === "card" && (
             <HeroCardTab
@@ -438,7 +578,8 @@ export default function App() {
           {tab === "web" && <CounterWebTab heroes={heroes} onPick={(id) => setSelectedId(id)} />}
           {tab === "roles" && <RolesTab heroes={heroes} onPick={(id) => { setSelectedId(id); setTab("card"); }} />}
           {tab === "draft" && <DraftTab heroes={heroes} onOpenCard={(id) => { setSelectedId(id); setTab("card"); }} />}
-        </>
+          {tab === "profile" && <ProfileTab heroes={heroes} steamIdFromUrl={steamIdFromUrl} onOpenCard={(id) => { setSelectedId(id); setTab("card"); }} />}
+        </div>
       )}
 
       <footer style={styles.footer}>Данные: OpenDota API</footer>
@@ -527,13 +668,184 @@ function HomeTab({ heroes, setTab }) {
           const Icon = c.icon;
           return (
             <button key={c.key} className="home-card" style={styles.homeCard} onClick={() => setTab(c.key)}>
-              <Icon size={22} color="#B24BF3" />
+              <div style={styles.homeCardIconBadge}>
+                <Icon size={20} color="#C084FC" />
+              </div>
               <div style={styles.homeCardTitle}>{c.title}</div>
               <div style={styles.homeCardDesc}>{c.desc}</div>
             </button>
           );
         })}
       </div>
+    </div>
+  );
+}
+
+const MONTH_RU = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
+
+function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
+  const [input, setInput] = useState("");
+  const [accountId, setAccountId] = useState(null);
+  const [parseError, setParseError] = useState(null);
+  const { loading, data, error } = usePlayerBundle(accountId);
+
+  useEffect(() => {
+    if (!steamIdFromUrl) return;
+    const id = parseSteamAccountId(steamIdFromUrl);
+    if (id) {
+      setAccountId(id);
+      setInput(steamIdFromUrl);
+    }
+  }, [steamIdFromUrl]);
+
+  const heroById = (id) => heroes.find((h) => h.id === id);
+
+  function handleSubmit(e) {
+    e.preventDefault();
+    const id = parseSteamAccountId(input);
+    if (!id) {
+      setParseError("Не удалось распознать ID. Вставь числовой Steam32 ID или ссылку вида steamcommunity.com/profiles/7656119...");
+      setAccountId(null);
+      return;
+    }
+    setParseError(null);
+    setAccountId(id);
+  }
+
+  const topHeroes = useMemo(() => {
+    if (!data?.heroesPlayed) return [];
+    return [...data.heroesPlayed]
+      .filter((h) => h.games >= 3)
+      .sort((a, b) => b.games - a.games)
+      .slice(0, 10)
+      .map((h) => ({ ...h, hero: heroById(h.hero_id), winRate: h.games > 0 ? h.win / h.games : 0 }))
+      .filter((h) => h.hero);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, heroes]);
+
+  const monthlyTrend = useMemo(() => {
+    if (!data?.matches) return [];
+    const byMonth = {};
+    data.matches.forEach((m) => {
+      if (m.start_time == null || m.player_slot == null || m.radiant_win == null) return;
+      const won = m.player_slot < 128 === m.radiant_win;
+      const d = new Date(m.start_time * 1000);
+      const key = `${d.getFullYear()}-${d.getMonth()}`;
+      if (!byMonth[key]) byMonth[key] = { games: 0, wins: 0, year: d.getFullYear(), month: d.getMonth() };
+      byMonth[key].games += 1;
+      if (won) byMonth[key].wins += 1;
+    });
+    return Object.values(byMonth)
+      .sort((a, b) => a.year - b.year || a.month - b.month)
+      .map((v) => ({
+        label: `${MONTH_RU[v.month]} ${String(v.year).slice(2)}`,
+        winRate: Math.round((v.wins / v.games) * 1000) / 10,
+        games: v.games,
+      }));
+  }, [data]);
+
+  return (
+    <div style={styles.body}>
+      <div style={styles.methodNote}>
+        <Info size={13} color="#9C8FB0" style={{ flexShrink: 0, marginTop: 2 }} />
+        <span>
+          Данные публичные (через OpenDota, без входа в Steam) — работает, только если у тебя в Dota 2 включено
+          "Expose Public Match Data" в настройках. Нужен Steam32 ID — вставь его или ссылку вида
+          steamcommunity.com/profiles/7656119...
+        </span>
+      </div>
+
+      <form onSubmit={handleSubmit} style={styles.profileForm}>
+        <input
+          style={styles.profileInput}
+          placeholder="Steam32 ID или ссылка на профиль…"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+        />
+        <button type="submit" style={styles.homeCta}>
+          Показать <ArrowRight size={16} />
+        </button>
+        <a href="/api/steam-login" style={styles.steamLoginBtn}>
+          Войти через Steam
+        </a>
+      </form>
+      <div style={{ ...styles.mutedText, fontSize: 11 }}>
+        Кнопка "Войти через Steam" работает только после настройки backend (см. инструкцию) — до этого пользуйся полем выше.
+      </div>
+      {parseError && <div style={styles.errorBox}>{parseError}</div>}
+
+      {loading && (
+        <div style={styles.centerMsg}>
+          <Loader2 className="spin" size={20} color="#B24BF3" />
+          <span style={{ marginLeft: 10 }}>Загружаю профиль…</span>
+        </div>
+      )}
+      {error && <div style={styles.errorBox}>{error}</div>}
+
+      {!loading && !error && data && (
+        <>
+          <div style={styles.panel}>
+            <div style={styles.profileHeader}>
+              {data.profile?.profile?.avatarfull && (
+                <img src={data.profile.profile.avatarfull} alt="" style={styles.profileAvatar} />
+              )}
+              <div>
+                <div style={styles.profileName}>{data.profile?.profile?.personaname || "Игрок"}</div>
+                <div style={styles.mutedText}>
+                  {data.wl.win + data.wl.lose > 0
+                    ? `${data.wl.win} побед / ${data.wl.lose} поражений (${((data.wl.win / (data.wl.win + data.wl.lose)) * 100).toFixed(1)}%)`
+                    : "Нет данных о матчах"}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {monthlyTrend.length > 0 && (
+            <div style={styles.panel}>
+              <div style={styles.panelHeader}>
+                <BarChart3 size={16} color="#B24BF3" />
+                <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Винрейт по месяцам</span>
+              </div>
+              <div style={{ width: "100%", height: 220 }}>
+                <ResponsiveContainer>
+                  <LineChart data={monthlyTrend} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#2A1A40" vertical={false} />
+                    <XAxis dataKey="label" tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={{ stroke: "#2A1A40" }} tickLine={false} />
+                    <YAxis domain={[0, 100]} tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={false} tickLine={false} unit="%" />
+                    <Tooltip
+                      contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 8, fontSize: 12 }}
+                      labelStyle={{ color: "#F2EAFB" }}
+                      formatter={(value, name, props) => [`${value}% (${props.payload.games} игр)`, "Винрейт"]}
+                    />
+                    <Line type="monotone" dataKey="winRate" stroke="#B24BF3" strokeWidth={2} dot={{ fill: "#B24BF3", r: 3 }} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+              <div style={{ ...styles.mutedText, fontSize: 11, marginTop: 6 }}>
+                По последним {data.matches.length} матчам (реальная история, без выдумки).
+              </div>
+            </div>
+          )}
+
+          <div style={styles.panel}>
+            <div style={styles.panelHeader}>
+              <Crown size={16} color="#B24BF3" />
+              <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Топ героев по количеству игр</span>
+            </div>
+            {topHeroes.length === 0 && <div style={styles.mutedText}>Недостаточно данных.</div>}
+            {topHeroes.map((h) => (
+              <div key={h.hero_id} className="role-row" style={styles.roleRow} onClick={() => onOpenCard(h.hero.id)}>
+                <HeroIcon hero={h.hero} style={styles.matchupIcon} />
+                <span style={styles.matchupName}>{h.hero.localized_name}</span>
+                <span style={styles.mutedText}>{h.games} игр</span>
+                <span style={{ ...styles.rolePct, color: h.winRate >= 0.5 ? "#5FCB8E" : "#E2574C" }}>
+                  {(h.winRate * 100).toFixed(0)}%
+                </span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -649,6 +961,8 @@ function HeroCardTab({ heroes, selected, selectedId, setSelectedId }) {
           <ItemsPanel heroId={selectedId} />
           <LaneRoleChart heroId={selectedId} />
         </div>
+
+        <HeroMonthlyTrendChart heroId={selectedId} />
       </div>
     </div>
   );
@@ -682,6 +996,45 @@ function PatchWinRateBadge({ heroId }) {
           {" "}<span style={{ fontSize: 10 }}>(экспериментально)</span>
         </span>
       )}
+    </div>
+  );
+}
+
+function HeroMonthlyTrendChart({ heroId }) {
+  const { loading, rows, error } = useHeroMonthlyTrend(heroId);
+
+  // experimental Explorer-based feature — hide entirely on failure, never break the page
+  if (error) return null;
+  if (!heroId) return null;
+
+  const hasData = rows && rows.some((r) => r.games > 0);
+
+  return (
+    <div style={styles.panel}>
+      <div style={styles.panelHeader}>
+        <BarChart3 size={16} color="#B24BF3" />
+        <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Тренд по месяцам (все игроки)</span>
+      </div>
+      {loading && <div style={styles.mutedText}>Считаю тренд…</div>}
+      {!loading && !hasData && <div style={styles.mutedText}>Недостаточно данных за последние месяцы.</div>}
+      {!loading && hasData && (
+        <div style={{ width: "100%", height: 200 }}>
+          <ResponsiveContainer>
+            <LineChart data={rows} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#2A1A40" vertical={false} />
+              <XAxis dataKey="label" tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={{ stroke: "#2A1A40" }} tickLine={false} />
+              <YAxis domain={[0, 100]} tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={false} tickLine={false} unit="%" />
+              <Tooltip
+                contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 8, fontSize: 12 }}
+                labelStyle={{ color: "#F2EAFB" }}
+                formatter={(value, name, props) => [`${value}% (${props.payload.games} игр)`, "Винрейт"]}
+              />
+              <Line type="monotone" dataKey="winRate" stroke="#B24BF3" strokeWidth={2} dot={{ fill: "#B24BF3", r: 3 }} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+      )}
+      <div style={{ ...styles.mutedText, fontSize: 10, marginTop: 6 }}>Экспериментально, за последние ~6 месяцев.</div>
     </div>
   );
 }
@@ -838,7 +1191,7 @@ function MatchupPanel({ title, icon, accent, items, loading, heroById, labelFor 
         <span style={{ ...styles.panelTitle, color: accent }}>{title}</span>
       </div>
       {loading && <div style={styles.mutedText}>Загрузка…</div>}
-      {!loading && items.length === 0 && <div style={styles.mutedText}>Недостаточно данных про-матчей.</div>}
+      {!loading && items.length === 0 && <div style={styles.emptyState}>Недостаточно данных про-матчей.</div>}
       {!loading &&
         items.map((m) => {
           const enemy = heroById(m.hero_id);
@@ -1285,6 +1638,7 @@ function SuggestionPanel({ title, color, items, heroById, onOpenCard }) {
       )}
       {items.map(({ hero, score, coverage, total, breakdown }) => {
         const tier = trustTier(coverage, total);
+        const enemyNames = breakdown.map((b) => heroById(b.enemyId)?.localized_name).filter(Boolean);
         const reasons = [...breakdown]
           .sort((a, b) => b.rate - a.rate)
           .slice(0, 2)
@@ -1305,9 +1659,44 @@ function SuggestionPanel({ title, color, items, heroById, onOpenCard }) {
                 {tier.emoji} {coverage}/{total} данных
               </span>
             </div>
+            <AiExplainButton heroName={hero.localized_name} enemyNames={enemyNames} />
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function AiExplainButton({ heroName, enemyNames }) {
+  const [state, setState] = useState({ loading: false, text: null, error: null });
+
+  async function explain(e) {
+    e.stopPropagation();
+    setState({ loading: true, text: null, error: null });
+    try {
+      const r = await fetch("/api/explain", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ heroName, enemyNames }),
+      });
+      if (!r.ok) throw new Error("network");
+      const data = await r.json();
+      setState({ loading: false, text: data.explanation || "Пустой ответ.", error: null });
+    } catch {
+      setState({ loading: false, text: null, error: "AI пока недоступен — нужно настроить backend (см. инструкцию)." });
+    }
+  }
+
+  return (
+    <div onClick={(e) => e.stopPropagation()}>
+      {!state.text && !state.loading && (
+        <button style={styles.aiBtn} onClick={explain}>
+          <MessageCircleQuestion size={12} /> Почему AI?
+        </button>
+      )}
+      {state.loading && <span style={{ ...styles.mutedText, fontSize: 11 }}>Спрашиваю AI…</span>}
+      {state.error && <span style={{ ...styles.mutedText, fontSize: 11, color: "#E2574C" }}>{state.error}</span>}
+      {state.text && <div style={styles.aiExplain}>{state.text}</div>}
     </div>
   );
 }
@@ -1362,6 +1751,8 @@ function RolesTab({ heroes, onPick }) {
         </span>
       </div>
 
+      {bracketKey === "pro" && <TopBansPanel heroes={heroes} onPick={onPick} />}
+
       <div style={styles.roleGrid}>
         {ROLE_ORDER.map((role) => {
           const list = byRole[role].slice(0, 5);
@@ -1371,9 +1762,9 @@ function RolesTab({ heroes, onPick }) {
                 <Crown size={16} color="#B24BF3" />
                 <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>{ROLE_RU[role] || role}</span>
               </div>
-              {list.length === 0 && <div style={styles.mutedText}>Недостаточно данных для этого ранга.</div>}
+              {list.length === 0 && <div style={styles.emptyState}>Недостаточно данных для этого ранга.</div>}
               {list.map(({ hero, winRate }, i) => (
-                <div key={hero.id} style={styles.roleRow} onClick={() => onPick(hero.id)}>
+                <div key={hero.id} className="role-row" style={styles.roleRow} onClick={() => onPick(hero.id)}>
                   <span style={styles.roleRank}>{i + 1}</span>
                   <HeroIcon hero={hero} style={styles.matchupIcon} />
                   <span style={styles.matchupName}>{hero.localized_name}</span>
@@ -1383,6 +1774,36 @@ function RolesTab({ heroes, onPick }) {
             </div>
           );
         })}
+      </div>
+    </div>
+  );
+}
+
+function TopBansPanel({ heroes, onPick }) {
+  const topBanned = useMemo(() => {
+    return [...heroes]
+      .filter((h) => h.pro_ban)
+      .sort((a, b) => b.pro_ban - a.pro_ban)
+      .slice(0, 10);
+  }, [heroes]);
+
+  if (topBanned.length === 0) return null;
+
+  return (
+    <div style={styles.panel}>
+      <div style={styles.panelHeader}>
+        <Swords size={16} color="#E2574C" />
+        <span style={{ ...styles.panelTitle, color: "#E2574C" }}>Топ банов в про-сцене</span>
+      </div>
+      <div style={styles.banGrid}>
+        {topBanned.map((h, i) => (
+          <div key={h.id} className="role-row" style={styles.roleRow} onClick={() => onPick(h.id)}>
+            <span style={styles.roleRank}>{i + 1}</span>
+            <HeroIcon hero={h} style={styles.matchupIcon} />
+            <span style={styles.matchupName}>{h.localized_name}</span>
+            <span style={{ ...styles.rolePct, color: "#E2574C" }}>{h.pro_ban}</span>
+          </div>
+        ))}
       </div>
     </div>
   );
@@ -1571,7 +1992,7 @@ const SCOPE_OPTIONS = [
   { key: "all", label: "Все герои", count: Infinity },
 ];
 const MIN_GAMES_EDGE = 20;
-const EDGE_WINRATE_THRESHOLD = 0.53;
+const EDGE_WINRATE_THRESHOLD = 0.55;
 
 function NodeRing({ x, y, isActive, color, dimmed, onClick }) {
   return (
@@ -1619,9 +2040,13 @@ function CounterWebTab({ heroes, onPick }) {
   const [buildProgress, setBuildProgress] = useState(null);
   const [built, setBuilt] = useState(null);
   const [activeId, setActiveId] = useState(null);
-  const [zoom, setZoom] = useState(() =>
-    typeof window !== "undefined" && window.innerWidth < 640 ? 0.5 : 1
-  );
+  const [zoom, setZoom] = useState(1);
+  const [autoFit, setAutoFit] = useState(true);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [searchQuery, setSearchQuery] = useState("");
+  const containerRef = useRef(null);
+  const dragState = useRef(null);
+  const didDragRef = useRef(false);
 
   async function buildGraph(nextScope) {
     const opt = SCOPE_OPTIONS.find((o) => o.key === nextScope);
@@ -1677,17 +2102,66 @@ function CounterWebTab({ heroes, onPick }) {
 
   const heroById = (id) => graphHeroes.find((h) => h.id === id);
 
+  const size = useMemo(() => {
+    const n = graphHeroes.length || 24;
+    // area needed scales with node count; phyllotaxis fills the disc evenly
+    const area = n * 950;
+    const radius = Math.max(280, Math.sqrt(area / Math.PI));
+    return Math.round(radius * 2 + 70);
+  }, [graphHeroes.length]);
+
   const nodes = useMemo(() => {
-    const grouped = { str: [], agi: [], int: [], all: [] };
-    graphHeroes.forEach((h) => grouped[ATTR[h.primary_attr] ? h.primary_attr : "all"].push(h));
-    const ordered = [...grouped.str, ...grouped.agi, ...grouped.int, ...grouped.all];
-    const n = ordered.length;
-    const size = 720, center = size / 2, radius = size / 2 - 46;
-    return ordered.map((h, i) => {
-      const angle = (i / n) * 2 * Math.PI - Math.PI / 2;
-      return { hero: h, x: center + radius * Math.cos(angle), y: center + radius * Math.sin(angle) };
+    const n = graphHeroes.length;
+    if (n === 0) return [];
+    const center = size / 2;
+    const maxRadius = size / 2 - 35;
+    const goldenAngle = Math.PI * (3 - Math.sqrt(5)); // ~137.5°
+    return graphHeroes.map((h, i) => {
+      const r = maxRadius * Math.sqrt((i + 0.5) / n);
+      const angle = i * goldenAngle;
+      return { hero: h, x: center + r * Math.cos(angle), y: center + r * Math.sin(angle) };
     });
-  }, [graphHeroes]);
+  }, [graphHeroes, size]);
+
+  // auto-fit the graph to the available viewport so it doesn't require scrolling —
+  // recalculates whenever the graph size changes (new scope) or the window resizes
+  useEffect(() => {
+    if (!autoFit) return;
+    function fit() {
+      if (!containerRef.current) return;
+      const availW = containerRef.current.clientWidth - 16;
+      const availH = containerRef.current.clientHeight - 16;
+      if (availW > 0 && availH > 0) {
+        const z = Math.max(0.3, Math.min(1, Math.min(availW / size, availH / size)));
+        setZoom(z);
+        setPan({ x: (availW - size * z) / 2, y: (availH - size * z) / 2 });
+      }
+    }
+    fit();
+    window.addEventListener("resize", fit);
+    return () => window.removeEventListener("resize", fit);
+  }, [size, autoFit]);
+
+  function onDragStart(clientX, clientY) {
+    dragState.current = { startX: clientX, startY: clientY, panX: pan.x, panY: pan.y };
+    didDragRef.current = false;
+  }
+  function onDragMove(clientX, clientY) {
+    if (!dragState.current) return;
+    const dx = clientX - dragState.current.startX;
+    const dy = clientY - dragState.current.startY;
+    if (Math.abs(dx) > 4 || Math.abs(dy) > 4) didDragRef.current = true;
+    setPan({ x: dragState.current.panX + dx, y: dragState.current.panY + dy });
+  }
+  function onDragEnd() {
+    dragState.current = null;
+  }
+
+  function handleNodeClick(heroId) {
+    if (didDragRef.current) return;
+    setActiveId((prev) => (prev === heroId ? null : heroId));
+    onPick(heroId);
+  }
 
   const nodePos = useMemo(() => {
     const map = {};
@@ -1705,7 +2179,23 @@ function CounterWebTab({ heroes, onPick }) {
   const activeHero = activeId ? heroById(activeId) : null;
   const beatsMe = activeEdges.filter((e) => e.winRate < 0.5).sort((a, b) => a.winRate - b.winRate);
   const iBeat = activeEdges.filter((e) => e.winRate > 0.5).sort((a, b) => b.winRate - a.winRate);
-  const size = 720;
+
+  const searchMatches = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    if (!q) return null;
+    return new Set(graphHeroes.filter((h) => h.localized_name.toLowerCase().includes(q)).map((h) => h.id));
+  }, [searchQuery, graphHeroes]);
+
+  function handleSearchKeyDown(e) {
+    if (e.key === "Enter" && searchMatches && searchMatches.size > 0) {
+      const firstId = [...searchMatches][0];
+      setActiveId(firstId);
+      onPick(firstId);
+      setSearchQuery("");
+    } else if (e.key === "Escape") {
+      setSearchQuery("");
+    }
+  }
 
   return (
     <div>
@@ -1735,14 +2225,42 @@ function CounterWebTab({ heroes, onPick }) {
       {!buildProgress && graphHeroes.length > 0 && (
         <div className="layout-cols" style={styles.webLayout}>
           <div style={styles.graphPanel}>
-            <div style={styles.zoomControls}>
-              <button style={styles.zoomBtn} onClick={() => setZoom((z) => Math.min(2, z + 0.2))}><ZoomIn size={14} /></button>
-              <button style={styles.zoomBtn} onClick={() => setZoom((z) => Math.max(0.4, z - 0.2))}><ZoomOut size={14} /></button>
-              <button style={styles.zoomBtn} onClick={() => setZoom(1)}><RotateCcw size={14} /></button>
+            <div style={styles.graphToolbar}>
+              <div style={styles.graphSearchWrap}>
+                <Search size={14} color="#9C8FB0" />
+                <input
+                  style={styles.dropdownInput}
+                  placeholder="Найти героя…"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onKeyDown={handleSearchKeyDown}
+                />
+              </div>
+              <div style={styles.zoomControls}>
+                <button style={styles.zoomBtn} onClick={() => { setAutoFit(false); setZoom((z) => Math.min(2.5, z + 0.2)); }}><ZoomIn size={14} /></button>
+                <button style={styles.zoomBtn} onClick={() => { setAutoFit(false); setZoom((z) => Math.max(0.2, z - 0.2)); }}><ZoomOut size={14} /></button>
+                <button style={styles.zoomBtn} onClick={() => setAutoFit(true)}><RotateCcw size={14} /></button>
+              </div>
             </div>
-            <div style={styles.svgScroll}>
-              <div style={{ position: "relative", width: size * zoom, height: size * zoom, flexShrink: 0 }}>
-                <svg width={size * zoom} height={size * zoom} viewBox={`0 0 ${size} ${size}`} style={{ position: "absolute", top: 0, left: 0 }}>
+            <div
+              style={{ ...styles.svgScroll, cursor: dragState.current ? "grabbing" : "grab", touchAction: "none" }}
+              ref={containerRef}
+              onPointerDown={(e) => onDragStart(e.clientX, e.clientY)}
+              onPointerMove={(e) => onDragMove(e.clientX, e.clientY)}
+              onPointerUp={onDragEnd}
+              onPointerLeave={onDragEnd}
+              onWheel={(e) => { e.preventDefault(); setAutoFit(false); setZoom((z) => Math.max(0.2, Math.min(2.5, z - e.deltaY * 0.001))); }}
+            >
+              <div style={{ position: "absolute", width: size, height: size, transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: "0 0" }}>
+                <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ position: "absolute", top: 0, left: 0, overflow: "visible" }}>
+                  <defs>
+                    <marker id="arrowhead-red" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+                      <path d="M0,0 L6,3 L0,6 Z" fill="#E2574C" />
+                    </marker>
+                    <marker id="arrowhead-green" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+                      <path d="M0,0 L6,3 L0,6 Z" fill="#5FCB8E" />
+                    </marker>
+                  </defs>
                   {activeHero &&
                     activeEdges.map((e) => {
                       const from = nodePos[activeId], to = nodePos[e.targetId];
@@ -1752,7 +2270,8 @@ function CounterWebTab({ heroes, onPick }) {
                         <line
                           className="edge-line" key={e.targetId} x1={from.x} y1={from.y} x2={to.x} y2={to.y}
                           stroke={isCounter ? "#E2574C" : "#5FCB8E"}
-                          strokeWidth={Math.max(1, counterScore(e.winRate) / 18)} opacity={0.75}
+                          strokeWidth={Math.max(1, counterScore(e.winRate) / 18)} opacity={0.8}
+                          markerEnd={`url(#arrowhead-${isCounter ? "red" : "green"})`}
                         />
                       );
                     })}
@@ -1762,8 +2281,11 @@ function CounterWebTab({ heroes, onPick }) {
                       x={x} y={y}
                       isActive={hero.id === activeId}
                       color={(ATTR[hero.primary_attr] || ATTR.all).color}
-                      dimmed={activeId && hero.id !== activeId && !activeEdges.find((e) => e.targetId === hero.id)}
-                      onClick={() => { setActiveId(hero.id === activeId ? null : hero.id); onPick(hero.id); }}
+                      dimmed={
+                        (activeId && hero.id !== activeId && !activeEdges.find((e) => e.targetId === hero.id)) ||
+                        (searchMatches && !searchMatches.has(hero.id))
+                      }
+                      onClick={() => handleNodeClick(hero.id)}
                     />
                   ))}
                 </svg>
@@ -1772,10 +2294,13 @@ function CounterWebTab({ heroes, onPick }) {
                     key={hero.id}
                     hero={hero}
                     x={x} y={y}
-                    zoom={zoom}
+                    zoom={1}
                     isActive={hero.id === activeId}
-                    dimmed={activeId && hero.id !== activeId && !activeEdges.find((e) => e.targetId === hero.id)}
-                    onClick={() => { setActiveId(hero.id === activeId ? null : hero.id); onPick(hero.id); }}
+                    dimmed={
+                      (activeId && hero.id !== activeId && !activeEdges.find((e) => e.targetId === hero.id)) ||
+                      (searchMatches && !searchMatches.has(hero.id))
+                    }
+                    onClick={() => handleNodeClick(hero.id)}
                   />
                 ))}
               </div>
@@ -1783,7 +2308,7 @@ function CounterWebTab({ heroes, onPick }) {
             <div style={styles.legend}>
               <span style={styles.legendItem}><span style={{ ...styles.legendLine, background: "#E2574C" }} /> контрит выбранного</span>
               <span style={styles.legendItem}><span style={{ ...styles.legendLine, background: "#5FCB8E" }} /> кого он контрит</span>
-              <span style={styles.legendItem}>толщина = сила контра</span>
+              <span style={styles.legendItem}>толщина = сила контра · тяни холст, крути колесо/кнопки для масштаба</span>
             </div>
           </div>
 
@@ -1806,7 +2331,7 @@ function CounterWebTab({ heroes, onPick }) {
                     const h = heroById(e.targetId);
                     if (!h) return null;
                     return (
-                      <div key={e.targetId} style={styles.sideRow}>
+                      <div key={e.targetId} className="side-row" style={styles.sideRow}>
                         <HeroIcon hero={h} style={styles.sideRowIcon} />
                         <span style={styles.sideRowName}>{h.localized_name}</span>
                         <span style={{ ...styles.sideRowScore, color: "#E2574C" }}>{((1 - e.winRate) * 100).toFixed(0)}%</span>
@@ -1820,7 +2345,7 @@ function CounterWebTab({ heroes, onPick }) {
                     const h = heroById(e.targetId);
                     if (!h) return null;
                     return (
-                      <div key={e.targetId} style={styles.sideRow}>
+                      <div key={e.targetId} className="side-row" style={styles.sideRow}>
                         <HeroIcon hero={h} style={styles.sideRowIcon} />
                         <span style={styles.sideRowName}>{h.localized_name}</span>
                         <span style={{ ...styles.sideRowScore, color: "#5FCB8E" }}>{(e.winRate * 100).toFixed(0)}%</span>
@@ -1845,7 +2370,13 @@ const styles = {
     width: "100%",
     maxWidth: "100vw",
     overflowX: "hidden",
-    background: "radial-gradient(circle at 15% 0%, rgba(109,40,217,0.14), transparent 45%), radial-gradient(circle at 85% 20%, rgba(178,75,243,0.10), transparent 40%), #07050D",
+    backgroundColor: "#07050D",
+    backgroundImage:
+      "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='30' height='52'%3E%3Cpath d='M15 1 L29 9 V35 L15 43 L1 35 V9 Z' fill='none' stroke='rgba(178,75,243,0.045)' stroke-width='1'/%3E%3C/svg%3E\"), " +
+      "radial-gradient(circle at 15% 0%, rgba(109,40,217,0.14), transparent 45%), " +
+      "radial-gradient(circle at 85% 20%, rgba(178,75,243,0.10), transparent 40%)",
+    backgroundSize: "30px 52px, auto, auto",
+    backgroundRepeat: "repeat, no-repeat, no-repeat",
     color: "#F2EAFB",
     fontFamily: "'Inter', sans-serif",
     padding: "20px",
@@ -1917,9 +2448,15 @@ const styles = {
   },
   homeGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 16 },
   homeCard: {
-    display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8, textAlign: "left",
-    background: "#140B22", border: "1px solid #2F1F49", borderRadius: 14, padding: 20, cursor: "pointer",
-    boxShadow: "0 0 30px rgba(109,40,217,0.1)", transition: "transform 0.15s ease, box-shadow 0.15s ease",
+    position: "relative", display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 10, textAlign: "left",
+    background: "linear-gradient(160deg, #170D28, #120A1E)", border: "1px solid #2F1F49", borderRadius: 14, padding: 20,
+    cursor: "pointer", overflow: "hidden",
+    boxShadow: "0 0 30px rgba(109,40,217,0.1)", transition: "transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease",
+  },
+  homeCardIconBadge: {
+    display: "flex", alignItems: "center", justifyContent: "center", width: 40, height: 40, borderRadius: 10,
+    background: "linear-gradient(135deg, rgba(178,75,243,0.18), rgba(109,40,217,0.08))",
+    border: "1px solid #3A2857",
   },
   homeCardTitle: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 16, color: "#F2EAFB" },
   homeCardDesc: { fontSize: 12, color: "#9C8FB0", lineHeight: 1.4 },
@@ -1952,8 +2489,8 @@ const styles = {
   },
   twoCol: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 },
   panel: { background: "#140B22", border: "1px solid #2F1F49", borderRadius: 12, padding: 16, boxShadow: "0 0 30px rgba(109,40,217,0.10)" },
-  panelHeader: { display: "flex", alignItems: "center", gap: 8, marginBottom: 10 },
-  panelTitle: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 600, fontSize: 14, letterSpacing: "0.03em" },
+  panelHeader: { display: "flex", alignItems: "center", gap: 8, marginBottom: 12, paddingBottom: 10, borderBottom: "1px solid #1D1230" },
+  panelTitle: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 15, letterSpacing: "0.04em" },
   mutedText: { fontSize: 12, color: "#9C8FB0" },
   matchupRow: { display: "flex", alignItems: "center", gap: 8, padding: "5px 0" },
   matchupIcon: { width: 22, height: 22, borderRadius: 4 },
@@ -2020,16 +2557,41 @@ const styles = {
   scoreBarTrack: { width: 80, height: 5, borderRadius: 3, background: "#2C1C42", overflow: "hidden" },
   scoreBarFill: { height: "100%", borderRadius: 3 },
   scoreNum: { fontSize: 12, fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, width: 24, textAlign: "right" },
-  emptyState: { padding: "30px 14px", textAlign: "center", color: "#6E5F86", fontSize: 13 },
+  emptyState: {
+    padding: "26px 14px", textAlign: "center", color: "#6E5F86", fontSize: 13,
+    border: "1px dashed #2A1A40", borderRadius: 10, margin: "4px 0",
+  },
   methodNote: { display: "flex", gap: 8, fontSize: 12, color: "#9C8FB0", background: "#0E081A", border: "1px solid #2A1A40", borderRadius: 8, padding: 12 },
   patchBadge: { display: "flex", alignItems: "center", gap: 8, fontSize: 12 },
+  profileForm: { display: "flex", gap: 10, flexWrap: "wrap" },
+  profileInput: {
+    flex: 1, minWidth: 220, background: "#140B22", border: "1px solid #2F1F49", borderRadius: 8,
+    padding: "10px 14px", color: "#F2EAFB", fontSize: 13, outline: "none",
+  },
+  steamLoginBtn: {
+    display: "flex", alignItems: "center", gap: 8, background: "#140B22", border: "1px solid #3A2857",
+    color: "#F2EAFB", fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 14, padding: "11px 20px",
+    borderRadius: 999, textDecoration: "none", cursor: "pointer",
+  },
+  profileHeader: { display: "flex", alignItems: "center", gap: 14 },
+  profileAvatar: { width: 56, height: 56, borderRadius: 12, border: "2px solid #B24BF3" },
+  profileName: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 18 },
   roleGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 16 },
-  roleRow: { display: "flex", alignItems: "center", gap: 8, padding: "6px 0", cursor: "pointer" },
+  banGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 4, columnGap: 24 },
+  roleRow: { display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", margin: "0 -8px", cursor: "pointer" },
   suggestionItem: { padding: "6px 0", borderBottom: "1px solid #241636", cursor: "pointer" },
   suggestionMeta: { display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginTop: 4, marginLeft: 30 },
   suggestionReason: { fontSize: 11, color: "#9C8FB0" },
   trustBadge: {
     fontSize: 10, padding: "2px 7px", borderRadius: 999, border: "1px solid", fontWeight: 600, marginLeft: "auto",
+  },
+  aiBtn: {
+    display: "flex", alignItems: "center", gap: 5, marginLeft: 30, marginTop: 6, background: "transparent",
+    border: "1px solid #3A2857", color: "#9C8FB0", fontSize: 11, padding: "4px 9px", borderRadius: 999, cursor: "pointer",
+  },
+  aiExplain: {
+    marginLeft: 30, marginTop: 6, fontSize: 12, color: "#C9BEDD", background: "#0E081A",
+    border: "1px solid #2A1A40", borderRadius: 8, padding: "8px 10px", lineHeight: 1.5,
   },
   roleRank: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 13, color: "#6E5F86", width: 14 },
   rolePct: { fontSize: 12, fontWeight: 600, color: "#B24BF3", marginLeft: "auto" },
@@ -2077,11 +2639,16 @@ const styles = {
   },
   progressTrack: { flex: 1, minWidth: 120, height: 6, background: "#2C1C42", borderRadius: 3, overflow: "hidden" },
   progressFill: { height: "100%", background: "#B24BF3", transition: "width 0.2s ease" },
-  webLayout: { display: "grid", gridTemplateColumns: "1fr 300px", gap: 16, maxWidth: 1100 },
+  webLayout: { display: "grid", gridTemplateColumns: "1fr 300px", gap: 16 },
   graphPanel: { background: "#0E081A", border: "1px solid #2A1A40", borderRadius: 12, padding: 12, display: "flex", flexDirection: "column", gap: 8 },
-  zoomControls: { display: "flex", gap: 6, justifyContent: "flex-end" },
+  zoomControls: { display: "flex", gap: 6, justifyContent: "flex-end", flexShrink: 0 },
+  graphToolbar: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" },
+  graphSearchWrap: {
+    display: "flex", alignItems: "center", gap: 8, background: "#150C24", border: "1px solid #2F1F49",
+    borderRadius: 8, padding: "6px 10px", minWidth: 180, flex: 1, maxWidth: 260,
+  },
   zoomBtn: { background: "#140B22", border: "1px solid #2F1F49", color: "#F2EAFB", borderRadius: 6, padding: 6, cursor: "pointer", display: "flex" },
-  svgScroll: { overflow: "auto", WebkitOverflowScrolling: "touch", maxHeight: "65vh", maxWidth: "100%" },
+  svgScroll: { overflow: "hidden", position: "relative", height: "65vh", maxWidth: "100%", background: "#0A0614", borderRadius: 8 },
   legend: { display: "flex", gap: 16, flexWrap: "wrap", fontSize: 11, color: "#9C8FB0", justifyContent: "center" },
   legendItem: { display: "flex", alignItems: "center", gap: 6 },
   legendLine: { width: 16, height: 3, borderRadius: 2, display: "inline-block" },
@@ -2092,7 +2659,7 @@ const styles = {
   sideHeroName: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 18 },
   sideSection: { marginBottom: 16 },
   sideSectionTitle: { fontSize: 12, fontWeight: 600, marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.03em" },
-  sideRow: { display: "flex", alignItems: "center", gap: 8, padding: "5px 0" },
+  sideRow: { display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", margin: "0 -8px" },
   sideRowIcon: { width: 22, height: 22, borderRadius: 4 },
   sideRowName: { fontSize: 13, flex: 1 },
   sideRowScore: { fontSize: 12, fontWeight: 700, fontFamily: "'Rajdhani', sans-serif" },
