@@ -181,6 +181,9 @@ export default function App() {
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
         * { box-sizing: border-box; }
+        html, body { overflow-x: hidden; max-width: 100%; margin: 0; padding: 0; }
+        body { display: block !important; place-items: initial !important; min-width: 0 !important; }
+        #root { max-width: none !important; width: 100% !important; margin: 0 !important; padding: 0 !important; text-align: left !important; }
         ::-webkit-scrollbar { width: 8px; height: 8px; }
         ::-webkit-scrollbar-thumb { background: #3A2857; border-radius: 4px; }
         button { font-family: 'Inter', sans-serif; }
@@ -198,10 +201,23 @@ export default function App() {
         .edge-line { transition: opacity 0.25s ease, stroke-width 0.25s ease; }
         .spin { animation: spin 1s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
+        .nav-scroll {
+          overflow-x: auto;
+          flex-wrap: nowrap !important;
+          -webkit-overflow-scrolling: touch;
+          scrollbar-width: none;
+          max-width: 100%;
+        }
+        .nav-scroll::-webkit-scrollbar { display: none; }
+        .nav-scroll button { flex-shrink: 0; white-space: nowrap; }
         @media (max-width: 860px) {
           .layout-cols { grid-template-columns: 1fr !important; }
           .toolbar { flex-direction: column !important; align-items: stretch !important; }
           .draft-grid { grid-template-columns: 1fr !important; }
+        }
+        @media (max-width: 600px) {
+          .nav-scroll button { font-size: 12px !important; padding: 7px 10px !important; }
+          .nav-scroll button span { display: none; }
         }
       `}</style>
 
@@ -213,7 +229,7 @@ export default function App() {
             <div style={styles.brandSub}>Драфт и контрпики Dota 2</div>
           </div>
         </div>
-        <nav style={styles.nav}>
+        <nav className="nav-scroll" style={styles.nav}>
           {TABS.map((t) => {
             const Icon = t.icon;
             const active = tab === t.key;
@@ -224,7 +240,7 @@ export default function App() {
                 style={{ ...styles.navBtn, ...(active ? styles.navBtnActive : {}) }}
               >
                 <Icon size={15} />
-                {t.label}
+                <span>{t.label}</span>
               </button>
             );
           })}
@@ -1265,6 +1281,9 @@ function CounterWebTab({ heroes, onPick }) {
 const styles = {
   page: {
     minHeight: "100vh",
+    width: "100%",
+    maxWidth: "100vw",
+    overflowX: "hidden",
     background: "radial-gradient(circle at 15% 0%, rgba(109,40,217,0.14), transparent 45%), radial-gradient(circle at 85% 20%, rgba(178,75,243,0.10), transparent 40%), #07050D",
     color: "#F2EAFB",
     fontFamily: "'Inter', sans-serif",
