@@ -525,12 +525,16 @@ export default function App() {
           50% { opacity: 1; transform: translateX(-50%) scale(1.1); }
         }
         .home-card:hover { transform: translateY(-3px); box-shadow: 0 0 40px rgba(178,75,243,0.25) !important; border-color: #B24BF3 !important; }
+        .stat-box:hover { border-color: #B24BF3 !important; }
+        .btn-lift { transition: transform 0.12s ease, box-shadow 0.12s ease; }
+        .btn-lift:hover { transform: translateY(-1px); }
         .home-text-col { text-align: left; }
         @media (max-width: 860px) {
           .layout-cols { grid-template-columns: 1fr !important; }
           .toolbar { flex-direction: column !important; align-items: stretch !important; }
           .draft-grid { grid-template-columns: 1fr !important; }
           .home-hero { flex-direction: column !important; gap: 20px !important; }
+          .hero-portrait-wrap { margin: 0 !important; }
           .home-text-col { text-align: center !important; }
           .home-text-col p { margin-left: auto !important; margin-right: auto !important; }
           .home-text-col button { margin-left: auto !important; margin-right: auto !important; }
@@ -639,28 +643,46 @@ const HOME_CARDS = [
   { key: "draft", title: "Драфт 5×5", desc: "Собери команды и получи рекомендацию пика", icon: Users },
 ];
 
+function StaticOrFallbackPortrait({ src, hero, style, className }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return <HeroIcon hero={hero} field="img" style={style} alt={hero.localized_name} />;
+  }
+  return (
+    <img
+      src={src}
+      alt={hero.localized_name}
+      className={className}
+      style={style}
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
 function HomeTab({ heroes, setTab }) {
-  const featured = useMemo(() => heroes.find((h) => h.localized_name === "Pudge") || heroes[0], [heroes]);
+  const axe = useMemo(() => heroes.find((h) => h.localized_name === "Axe") || heroes[0], [heroes]);
 
   return (
     <div style={styles.homeWrap}>
       <div className="home-hero" style={styles.homeHero}>
         <div style={styles.homeGlow} />
-        {featured && (
-          <div style={styles.homePortraitWrap}>
-            <HeroIcon hero={featured} field="img" style={styles.homePortrait} alt={featured.localized_name} />
-          </div>
-        )}
+
         <div className="home-text-col" style={styles.homeTextCol}>
           <h1 style={styles.homeTitle}>DraftHex</h1>
           <p style={styles.homeTagline}>
             Реальная статистика OpenDota вместо догадок: контрпики, драфт 5×5 и мета — на живых данных,
             без выдуманных советов.
           </p>
-          <button style={styles.homeCta} onClick={() => setTab("card")}>
+          <button className="btn-lift" style={styles.homeCta} onClick={() => setTab("card")}>
             Начать <ArrowRight size={16} />
           </button>
         </div>
+
+        {axe && (
+          <div className="hero-portrait-wrap" style={styles.homePortraitWrap}>
+            <StaticOrFallbackPortrait src="/axe-hero.png" hero={axe} style={styles.homePortraitStatic} />
+          </div>
+        )}
       </div>
 
       <div style={styles.homeGrid}>
@@ -762,10 +784,10 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
           value={input}
           onChange={(e) => setInput(e.target.value)}
         />
-        <button type="submit" style={styles.homeCta}>
+        <button type="submit" className="btn-lift" style={styles.homeCta}>
           Показать <ArrowRight size={16} />
         </button>
-        <a href="/api/steam-login" style={styles.steamLoginBtn}>
+        <a href="/api/steam-login" className="btn-lift" style={styles.steamLoginBtn}>
           Войти через Steam
         </a>
       </form>
@@ -1156,7 +1178,7 @@ function LaneRoleChart({ heroId }) {
 
 function Stat({ label, value }) {
   return (
-    <div style={styles.statBox}>
+    <div className="stat-box" style={styles.statBox}>
       <div style={styles.statValue}>{value}</div>
       <div style={styles.statLabel}>{label}</div>
     </div>
@@ -2043,18 +2065,24 @@ function CounterWebTab({ heroes, onPick }) {
 
     const toFetch = selection.filter((h) => !matchupsCache.has(h.id) && !readLocalCache(`dw_matchups_${h.id}`));
     if (toFetch.length) {
-      let done = selection.length - toFetch.length;
-      setBuildProgress({ done, total: selection.length });
-      for (const h of toFetch) {
-        try {
-          await getMatchups(h.id);
-        } catch {
-          // skip hero on failure, graph just won't show its edges
+      const doneBase = selection.length - toFetch.length;
+      setBuildProgress({ done: doneBase, total: selection.length });
+      let completed = 0;
+      const CONCURRENCY = 6;
+      let cursor = 0;
+      async function worker() {
+        while (cursor < toFetch.length) {
+          const h = toFetch[cursor++];
+          try {
+            await getMatchups(h.id);
+          } catch {
+            // skip hero on failure, graph just won't show its edges
+          }
+          completed += 1;
+          setBuildProgress({ done: doneBase + completed, total: selection.length });
         }
-        done += 1;
-        setBuildProgress({ done, total: selection.length });
-        await new Promise((res) => setTimeout(res, 220));
       }
+      await Promise.all(Array.from({ length: Math.min(CONCURRENCY, toFetch.length) }, worker));
     } else {
       // everything already cached (memory or localStorage) — load instantly
       selection.forEach((h) => {
@@ -2400,7 +2428,7 @@ const styles = {
   homeWrap: { maxWidth: 1040, margin: "0 auto", display: "flex", flexDirection: "column", gap: 32 },
   homeHero: {
     position: "relative", padding: "40px 20px",
-    display: "flex", alignItems: "center", gap: 40,
+    display: "flex", alignItems: "center", gap: 0,
   },
   homeGlow: {
     position: "absolute", top: "10%", left: "18%", width: 360, height: 360, transform: "translateX(-50%)",
@@ -2408,13 +2436,16 @@ const styles = {
     filter: "blur(10px)", zIndex: 0, animation: "pulseGlow 4s ease-in-out infinite",
   },
   homePortraitWrap: {
-    position: "relative", zIndex: 1, flexShrink: 0, animation: "floatHero 5s ease-in-out infinite",
-    maskImage: "linear-gradient(to bottom, black 78%, transparent 100%)",
-    WebkitMaskImage: "linear-gradient(to bottom, black 78%, transparent 100%)",
+    position: "relative", zIndex: 3, flexShrink: 0, marginLeft: -70, marginRight: -20,
+    animation: "floatHero 5s ease-in-out infinite", pointerEvents: "none",
   },
   homePortrait: {
     width: 260, height: "auto", maxHeight: 380, objectFit: "contain",
     filter: "drop-shadow(0 0 45px rgba(178,75,243,0.5))",
+  },
+  homePortraitStatic: {
+    width: "clamp(220px, 26vw, 340px)", height: "auto", maxHeight: 420, objectFit: "contain",
+    filter: "drop-shadow(0 15px 25px rgba(0,0,0,0.5)) drop-shadow(0 0 35px rgba(178,75,243,0.4))",
   },
   homeTextCol: { position: "relative", zIndex: 1, flex: 1, minWidth: 0 },
   homeTitle: {
@@ -2457,7 +2488,7 @@ const styles = {
   heroChipName: { fontSize: 13, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   attrDot: { width: 8, height: 8, borderRadius: "50%", flexShrink: 0 },
   detail: { display: "flex", flexDirection: "column", gap: 16 },
-  card: { background: "#140B22", border: "1px solid #2F1F49", borderRadius: 12, padding: 20, boxShadow: "0 0 40px rgba(109,40,217,0.12)" },
+  card: { background: "#140B22", border: "1px solid #2F1F49", borderRadius: 16, padding: 22, boxShadow: "0 0 40px rgba(109,40,217,0.12)" },
   cardTop: { display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" },
   portrait: { width: 76, height: 76, borderRadius: 10, objectFit: "cover", flexShrink: 0 },
   heroName: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 26, letterSpacing: "0.01em" },
@@ -2465,7 +2496,10 @@ const styles = {
   tag: { fontSize: 11, padding: "2px 8px", borderRadius: 999, border: "1px solid", fontWeight: 600 },
   tagMuted: { fontSize: 11, padding: "2px 8px", borderRadius: 999, border: "1px solid #3A2857", color: "#9C8FB0" },
   statsGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 12, marginTop: 20 },
-  statBox: { background: "#0F1319", border: "1px solid #2C1C42", borderRadius: 8, padding: "10px 12px" },
+  statBox: {
+    background: "linear-gradient(160deg, #14101F, #0F1319)", border: "1px solid #2C1C42", borderRadius: 10,
+    padding: "12px 14px", transition: "border-color 0.15s ease",
+  },
   statValue: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 18 },
   statLabel: { fontSize: 11, color: "#9C8FB0", marginTop: 2 },
   gaugeLabel: {
@@ -2473,7 +2507,7 @@ const styles = {
     justifyContent: "center", fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 15,
   },
   twoCol: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 },
-  panel: { background: "#140B22", border: "1px solid #2F1F49", borderRadius: 12, padding: 16, boxShadow: "0 0 30px rgba(109,40,217,0.10)" },
+  panel: { background: "#140B22", border: "1px solid #2F1F49", borderRadius: 14, padding: 18, boxShadow: "0 0 30px rgba(109,40,217,0.10)" },
   panelHeader: { display: "flex", alignItems: "center", gap: 8, marginBottom: 12, paddingBottom: 10, borderBottom: "1px solid #1D1230" },
   panelTitle: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 15, letterSpacing: "0.04em" },
   mutedText: { fontSize: 12, color: "#9C8FB0" },
