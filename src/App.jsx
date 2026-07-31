@@ -4,7 +4,7 @@ import {
   Search, Swords, TrendingUp, TrendingDown, Loader2, Info,
   ChevronDown, ArrowUpDown, ZoomIn, ZoomOut, RotateCcw,
   IdCard, Network, Table2, Crown, Star, X, Plus, Users, Sparkles,
-  Home, Menu, ArrowRight, ShoppingBag, BarChart3, User, MessageCircleQuestion,
+  Home, Menu, ArrowRight, ShoppingBag, BarChart3, User, MessageCircleQuestion, Lock,
 } from "lucide-react";
 
 /* ---------- shared design tokens ---------- */
@@ -1638,7 +1638,6 @@ function SuggestionPanel({ title, color, items, heroById, onOpenCard }) {
       )}
       {items.map(({ hero, score, coverage, total, breakdown }) => {
         const tier = trustTier(coverage, total);
-        const enemyNames = breakdown.map((b) => heroById(b.enemyId)?.localized_name).filter(Boolean);
         const reasons = [...breakdown]
           .sort((a, b) => b.rate - a.rate)
           .slice(0, 2)
@@ -1659,7 +1658,7 @@ function SuggestionPanel({ title, color, items, heroById, onOpenCard }) {
                 {tier.emoji} {coverage}/{total} данных
               </span>
             </div>
-            <AiExplainButton heroName={hero.localized_name} enemyNames={enemyNames} />
+            <AiExplainButton />
           </div>
         );
       })}
@@ -1667,36 +1666,22 @@ function SuggestionPanel({ title, color, items, heroById, onOpenCard }) {
   );
 }
 
-function AiExplainButton({ heroName, enemyNames }) {
-  const [state, setState] = useState({ loading: false, text: null, error: null });
-
-  async function explain(e) {
-    e.stopPropagation();
-    setState({ loading: true, text: null, error: null });
-    try {
-      const r = await fetch("/api/explain", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ heroName, enemyNames }),
-      });
-      if (!r.ok) throw new Error("network");
-      const data = await r.json();
-      setState({ loading: false, text: data.explanation || "Пустой ответ.", error: null });
-    } catch {
-      setState({ loading: false, text: null, error: "AI пока недоступен — нужно настроить backend (см. инструкцию)." });
-    }
-  }
+function AiExplainButton() {
+  const [showTeaser, setShowTeaser] = useState(false);
 
   return (
     <div onClick={(e) => e.stopPropagation()}>
-      {!state.text && !state.loading && (
-        <button style={styles.aiBtn} onClick={explain}>
-          <MessageCircleQuestion size={12} /> Почему AI?
+      {!showTeaser && (
+        <button style={styles.premiumBtn} onClick={() => setShowTeaser(true)}>
+          <Lock size={11} /> Почему AI? <span style={styles.premiumTag}>PREMIUM</span>
         </button>
       )}
-      {state.loading && <span style={{ ...styles.mutedText, fontSize: 11 }}>Спрашиваю AI…</span>}
-      {state.error && <span style={{ ...styles.mutedText, fontSize: 11, color: "#E2574C" }}>{state.error}</span>}
-      {state.text && <div style={styles.aiExplain}>{state.text}</div>}
+      {showTeaser && (
+        <div style={styles.premiumTeaser}>
+          <Sparkles size={12} color="#E5B33D" />
+          AI-объяснение пика — часть Premium-подписки. Пока в разработке.
+        </div>
+      )}
     </div>
   );
 }
@@ -2585,13 +2570,17 @@ const styles = {
   trustBadge: {
     fontSize: 10, padding: "2px 7px", borderRadius: 999, border: "1px solid", fontWeight: 600, marginLeft: "auto",
   },
-  aiBtn: {
+  premiumBtn: {
     display: "flex", alignItems: "center", gap: 5, marginLeft: 30, marginTop: 6, background: "transparent",
-    border: "1px solid #3A2857", color: "#9C8FB0", fontSize: 11, padding: "4px 9px", borderRadius: 999, cursor: "pointer",
+    border: "1px solid #4A3D1E", color: "#C9BEDD", fontSize: 11, padding: "4px 9px", borderRadius: 999, cursor: "pointer",
   },
-  aiExplain: {
-    marginLeft: 30, marginTop: 6, fontSize: 12, color: "#C9BEDD", background: "#0E081A",
-    border: "1px solid #2A1A40", borderRadius: 8, padding: "8px 10px", lineHeight: 1.5,
+  premiumTag: {
+    fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 9, letterSpacing: "0.05em",
+    color: "#E5B33D", marginLeft: 2,
+  },
+  premiumTeaser: {
+    display: "flex", alignItems: "center", gap: 6, marginLeft: 30, marginTop: 6, fontSize: 11, color: "#C9BEDD",
+    background: "#1A1508", border: "1px solid #4A3D1E", borderRadius: 8, padding: "6px 10px", lineHeight: 1.4,
   },
   roleRank: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 13, color: "#6E5F86", width: 14 },
   rolePct: { fontSize: 12, fontWeight: 600, color: "#B24BF3", marginLeft: "auto" },
