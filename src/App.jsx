@@ -181,7 +181,7 @@ export default function App() {
   return (
     <div style={styles.page}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700;900&family=Rajdhani:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@1,600;1,700;1,900&family=Rajdhani:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
         * { box-sizing: border-box; }
         html, body { overflow-x: hidden; max-width: 100%; margin: 0; padding: 0; }
         body { display: block !important; place-items: initial !important; min-width: 0 !important; }
@@ -212,10 +212,15 @@ export default function App() {
           50% { opacity: 1; transform: translateX(-50%) scale(1.1); }
         }
         .home-card:hover { transform: translateY(-3px); box-shadow: 0 0 40px rgba(178,75,243,0.25) !important; }
+        .home-text-col { text-align: left; }
         @media (max-width: 860px) {
           .layout-cols { grid-template-columns: 1fr !important; }
           .toolbar { flex-direction: column !important; align-items: stretch !important; }
           .draft-grid { grid-template-columns: 1fr !important; }
+          .home-hero { flex-direction: column !important; gap: 20px !important; }
+          .home-text-col { text-align: center !important; }
+          .home-text-col p { margin-left: auto !important; margin-right: auto !important; }
+          .home-text-col button { margin-left: auto !important; margin-right: auto !important; }
         }
       `}</style>
 
@@ -325,21 +330,23 @@ function HomeTab({ heroes, setTab }) {
 
   return (
     <div style={styles.homeWrap}>
-      <div style={styles.homeHero}>
+      <div className="home-hero" style={styles.homeHero}>
         <div style={styles.homeGlow} />
         {featured && (
           <div style={styles.homePortraitWrap}>
             <HeroIcon hero={featured} field="img" style={styles.homePortrait} alt={featured.localized_name} />
           </div>
         )}
-        <h1 style={styles.homeTitle}>DRAFTHEX</h1>
-        <p style={styles.homeTagline}>
-          Реальная статистика OpenDota вместо догадок: контрпики, драфт 5×5 и мета — на живых данных,
-          без выдуманных советов.
-        </p>
-        <button style={styles.homeCta} onClick={() => setTab("card")}>
-          Начать <ArrowRight size={16} />
-        </button>
+        <div className="home-text-col" style={styles.homeTextCol}>
+          <h1 style={styles.homeTitle}>DraftHex</h1>
+          <p style={styles.homeTagline}>
+            Реальная статистика OpenDota вместо догадок: контрпики, драфт 5×5 и мета — на живых данных,
+            без выдуманных советов.
+          </p>
+          <button style={styles.homeCta} onClick={() => setTab("card")}>
+            Начать <ArrowRight size={16} />
+          </button>
+        </div>
       </div>
 
       <div style={styles.homeGrid}>
@@ -566,6 +573,14 @@ function useHeroPool() {
 
 /* ---------- tab 5: draft 5x5 ---------- */
 
+const POSITIONS = [
+  { label: "Позиция 1", hint: "Керри" },
+  { label: "Позиция 2", hint: "Мидлейнер" },
+  { label: "Позиция 3", hint: "Оффлейнер" },
+  { label: "Позиция 4", hint: "Саппорт" },
+  { label: "Позиция 5", hint: "Хард-саппорт" },
+];
+
 function DraftTab({ heroes, onOpenCard }) {
   const [radiant, setRadiant] = useState([null, null, null, null, null]);
   const [dire, setDire] = useState([null, null, null, null, null]);
@@ -629,6 +644,52 @@ function DraftTab({ heroes, onOpenCard }) {
   const totalPossiblePairs = radiant.filter(Boolean).length * dire.filter(Boolean).length;
   const radiantEstimate =
     matchupPairs.length > 0 ? matchupPairs.reduce((s, x) => s + x.wr, 0) / matchupPairs.length : null;
+
+  function biggestThreat(myTeam, enemyTeam) {
+    const myIds = myTeam.filter(Boolean);
+    const enemyIds = enemyTeam.filter(Boolean);
+    if (!myIds.length || !enemyIds.length) return null;
+    let worst = null;
+    enemyIds.forEach((eid) => {
+      const rates = myIds.map((mid) => pairWinRate(mid, eid)).filter((v) => v != null);
+      if (!rates.length) return;
+      const avg = rates.reduce((s, v) => s + v, 0) / rates.length;
+      if (!worst || avg < worst.avg) worst = { heroId: eid, avg, coverage: rates.length, total: myIds.length };
+    });
+    return worst;
+  }
+
+  function bestOpportunity(myTeam, enemyTeam) {
+    const myIds = myTeam.filter(Boolean);
+    const enemyIds = enemyTeam.filter(Boolean);
+    if (!myIds.length || !enemyIds.length) return null;
+    let best = null;
+    myIds.forEach((mid) => {
+      const rates = enemyIds.map((eid) => pairWinRate(mid, eid)).filter((v) => v != null);
+      if (!rates.length) return;
+      const avg = rates.reduce((s, v) => s + v, 0) / rates.length;
+      if (!best || avg > best.avg) best = { heroId: mid, avg, coverage: rates.length, total: enemyIds.length };
+    });
+    return best;
+  }
+
+  function farmPriority(myTeam) {
+    const myIds = myTeam.filter(Boolean);
+    const carries = myIds
+      .map((id) => heroById(id))
+      .filter((h) => h && h.roles && h.roles.includes("Carry") && h.pro_pick);
+    if (!carries.length) return null;
+    const ranked = carries.map((h) => ({ hero: h, wr: h.pro_win / h.pro_pick })).sort((a, b) => b.wr - a.wr);
+    return ranked[0];
+  }
+
+  function gamePlanFor(myTeam, enemyTeam) {
+    return {
+      threat: biggestThreat(myTeam, enemyTeam),
+      opportunity: bestOpportunity(myTeam, enemyTeam),
+      farm: farmPriority(myTeam),
+    };
+  }
 
   function suggestions(side) {
     const enemyIds = (side === "radiant" ? dire : radiant).filter(Boolean);
@@ -734,12 +795,18 @@ function DraftTab({ heroes, onOpenCard }) {
         <SuggestionPanel title="Лучший пик за Dire" color="#E2574C" items={suggestions("dire")} onOpenCard={onOpenCard} />
       </div>
 
+      <div style={styles.twoCol}>
+        <GamePlanPanel title="План игры — Radiant" color="#5FCB8E" plan={gamePlanFor(radiant, dire)} heroById={heroById} onOpenCard={onOpenCard} />
+        <GamePlanPanel title="План игры — Dire" color="#E2574C" plan={gamePlanFor(dire, radiant)} heroById={heroById} onOpenCard={onOpenCard} />
+      </div>
+
       <div style={styles.methodNote}>
         <Info size={13} color="#9C8FB0" style={{ flexShrink: 0, marginTop: 2 }} />
         <span>
-          Перевес и рекомендации считаются как среднее реальных винрейтов между выбранными героями (проф. матчи).
-          Это не учитывает синергию союзников, предметы и стадию игры (линия/мид/лейт) — таких данных в открытом
-          API нет, добавлять их выдумкой не буду.
+          Позиции 1–5 — фиксированные стандартные слоты (не определяются автоматически, выбираешь героя в нужный
+          слот сам). Перевес, рекомендации и план игры считаются как средние реальных винрейтов между выбранными
+          героями (проф. матчи). Это не учитывает синергию союзников, предметы и стадию игры (линия/мид/лейт) —
+          таких данных в открытом API нет, добавлять их выдумкой не буду.
         </span>
       </div>
 
@@ -790,8 +857,10 @@ function TeamPanel({ title, color, team, heroById, onSlotClick, onClear }) {
       <div style={{ ...styles.panelTitle, color, marginBottom: 10 }}>{title}</div>
       {team.map((id, i) => {
         const h = id ? heroById(id) : null;
+        const pos = POSITIONS[i];
         return (
           <div key={i} style={styles.slotRow}>
+            <span style={styles.slotPos}>{pos.label}</span>
             {h ? (
               <>
                 <HeroIcon hero={h} style={styles.matchupIcon} />
@@ -800,12 +869,75 @@ function TeamPanel({ title, color, team, heroById, onSlotClick, onClear }) {
               </>
             ) : (
               <button style={styles.slotEmpty} onClick={() => onSlotClick(i)}>
-                <Plus size={14} /> Выбрать героя
+                <Plus size={14} /> {pos.hint}
               </button>
             )}
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function GamePlanPanel({ title, color, plan, heroById, onOpenCard }) {
+  const { threat, opportunity, farm } = plan;
+  const hasAny = threat || opportunity || farm;
+
+  return (
+    <div style={styles.panel}>
+      <div style={styles.panelHeader}>
+        <Swords size={16} color={color} />
+        <span style={{ ...styles.panelTitle, color }}>{title}</span>
+      </div>
+
+      {!hasAny && (
+        <div style={styles.mutedText}>Собери обе команды хотя бы частично, чтобы увидеть план.</div>
+      )}
+
+      {threat && (
+        <PlanLine
+          icon={<TrendingDown size={14} color="#E2574C" />}
+          label="Главная угроза"
+          hero={heroById(threat.heroId)}
+          note={`в среднем контрит команду на ${((0.5 - threat.avg) * 200).toFixed(0)}%`}
+          onOpenCard={onOpenCard}
+        />
+      )}
+      {opportunity && (
+        <PlanLine
+          icon={<TrendingUp size={14} color="#5FCB8E" />}
+          label="Лучший шанс"
+          hero={heroById(opportunity.heroId)}
+          note={`перевес против соперника ${(opportunity.avg * 100).toFixed(0)}%`}
+          onOpenCard={onOpenCard}
+        />
+      )}
+      {farm && (
+        <PlanLine
+          icon={<Crown size={14} color="#B24BF3" />}
+          label="Приоритет фарма"
+          hero={farm.hero}
+          note={`лучший проф. винрейт среди керри команды (${(farm.wr * 100).toFixed(0)}%)`}
+          onOpenCard={onOpenCard}
+        />
+      )}
+    </div>
+  );
+}
+
+function PlanLine({ icon, label, hero, note, onOpenCard }) {
+  if (!hero) return null;
+  return (
+    <div style={styles.planLine}>
+      <div style={styles.planLineHeader}>
+        {icon}
+        <span style={styles.planLineLabel}>{label}</span>
+      </div>
+      <div style={styles.planLineRow} onClick={() => onOpenCard(hero.id)}>
+        <HeroIcon hero={hero} style={styles.matchupIcon} />
+        <span style={styles.matchupName}>{hero.localized_name}</span>
+      </div>
+      <div style={styles.planLineNote}>{note}</div>
     </div>
   );
 }
@@ -1365,7 +1497,7 @@ const styles = {
   header: { display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 16, marginBottom: 20 },
   brandRow: { display: "flex", alignItems: "center", gap: 12 },
   brandWordmark: {
-    fontFamily: "'Cinzel', serif", fontWeight: 900, fontSize: 26, letterSpacing: "0.06em",
+    fontFamily: "'Playfair Display', serif", fontStyle: "italic", fontWeight: 700, fontSize: 26, letterSpacing: "0.02em",
     background: "linear-gradient(135deg, #E9D5FF, #B24BF3 55%, #6D28D9)",
     WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent",
     textShadow: "0 0 24px rgba(178,75,243,0.35)",
@@ -1394,29 +1526,34 @@ const styles = {
 
   homeWrap: { maxWidth: 1040, margin: "0 auto", display: "flex", flexDirection: "column", gap: 32 },
   homeHero: {
-    position: "relative", textAlign: "center", padding: "48px 20px 40px",
-    display: "flex", flexDirection: "column", alignItems: "center", gap: 14, overflow: "hidden",
+    position: "relative", padding: "40px 20px", overflow: "hidden",
+    display: "flex", alignItems: "center", gap: 40,
   },
   homeGlow: {
-    position: "absolute", top: "10%", left: "50%", width: 360, height: 360, transform: "translateX(-50%)",
+    position: "absolute", top: "10%", left: "18%", width: 360, height: 360, transform: "translateX(-50%)",
     background: "radial-gradient(circle, rgba(178,75,243,0.35), transparent 70%)",
     filter: "blur(10px)", zIndex: 0, animation: "pulseGlow 4s ease-in-out infinite",
   },
-  homePortraitWrap: { position: "relative", zIndex: 1, animation: "floatHero 5s ease-in-out infinite" },
-  homePortrait: {
-    width: 160, height: 160, borderRadius: "50%", objectFit: "cover",
-    border: "2px solid #B24BF3", boxShadow: "0 0 40px rgba(178,75,243,0.55)",
+  homePortraitWrap: {
+    position: "relative", zIndex: 1, flexShrink: 0, animation: "floatHero 5s ease-in-out infinite",
+    maskImage: "linear-gradient(to bottom, black 78%, transparent 100%)",
+    WebkitMaskImage: "linear-gradient(to bottom, black 78%, transparent 100%)",
   },
+  homePortrait: {
+    width: 260, height: "auto", maxHeight: 380, objectFit: "contain",
+    filter: "drop-shadow(0 0 45px rgba(178,75,243,0.5))",
+  },
+  homeTextCol: { position: "relative", zIndex: 1, flex: 1, minWidth: 0 },
   homeTitle: {
-    position: "relative", zIndex: 1, fontFamily: "'Cinzel', serif", fontWeight: 900,
-    fontSize: "clamp(36px, 7vw, 64px)", letterSpacing: "0.06em", margin: 0,
+    fontFamily: "'Playfair Display', serif", fontStyle: "italic", fontWeight: 700,
+    fontSize: "clamp(34px, 6vw, 58px)", letterSpacing: "0.01em", margin: 0,
     background: "linear-gradient(135deg, #F2EAFB, #C084FC 50%, #6D28D9)",
     WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent",
     textShadow: "0 0 40px rgba(178,75,243,0.4)",
   },
-  homeTagline: { position: "relative", zIndex: 1, maxWidth: 520, fontSize: 15, color: "#C9BEDD", lineHeight: 1.6 },
+  homeTagline: { maxWidth: 480, fontSize: 15, color: "#C9BEDD", lineHeight: 1.6, marginTop: 14 },
   homeCta: {
-    position: "relative", zIndex: 1, display: "flex", alignItems: "center", gap: 8, marginTop: 8,
+    display: "flex", alignItems: "center", gap: 8, marginTop: 20,
     background: "linear-gradient(135deg, #C084FC, #6D28D9)", border: "none", color: "#fff",
     fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 15, padding: "12px 26px",
     borderRadius: 999, cursor: "pointer", boxShadow: "0 0 24px rgba(178,75,243,0.5)",
@@ -1536,6 +1673,12 @@ const styles = {
   },
   vsPct: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 32, color: "#B24BF3" },
   slotRow: { display: "flex", alignItems: "center", gap: 8, padding: "6px 0", minHeight: 32 },
+  slotPos: { fontSize: 10, color: "#6E5F86", width: 62, flexShrink: 0, textTransform: "uppercase", letterSpacing: "0.03em" },
+  planLine: { padding: "10px 0", borderBottom: "1px solid #241636" },
+  planLineHeader: { display: "flex", alignItems: "center", gap: 6, marginBottom: 6 },
+  planLineLabel: { fontSize: 11, color: "#9C8FB0", textTransform: "uppercase", letterSpacing: "0.03em" },
+  planLineRow: { display: "flex", alignItems: "center", gap: 8, cursor: "pointer" },
+  planLineNote: { fontSize: 11, color: "#6E5F86", marginTop: 4, marginLeft: 30 },
   slotEmpty: {
     display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "1px dashed #3A2857",
     color: "#6E5F86", borderRadius: 6, padding: "6px 10px", fontSize: 12, cursor: "pointer", width: "100%",
