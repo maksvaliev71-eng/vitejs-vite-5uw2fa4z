@@ -13,7 +13,8 @@
     "lucide-react": "^1.28.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "recharts": "^2.15.0"
+    "recharts": "^2.15.0",
+    "node-steam-openid": "^2.0.4"
   },
   "devDependencies": {
     "@types/react": "^19.2.17",
