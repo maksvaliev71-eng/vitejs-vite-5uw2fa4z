@@ -3,6 +3,7 @@ import {
   Search, Swords, TrendingUp, TrendingDown, Loader2, Info,
   ChevronDown, ArrowUpDown, ZoomIn, ZoomOut, RotateCcw,
   IdCard, Network, Table2, Crown, Star, X, Plus, Users, Sparkles,
+  Home, Menu, ArrowRight,
 } from "lucide-react";
 
 /* ---------- shared design tokens ---------- */
@@ -134,6 +135,7 @@ function useMatchups(heroId) {
 /* ---------- root app ---------- */
 
 const TABS = [
+  { key: "home", label: "Главная", icon: Home },
   { key: "card", label: "Карточка героя", icon: IdCard },
   { key: "table", label: "Таблица контрпиков", icon: Table2 },
   { key: "web", label: "Паутина", icon: Network },
@@ -145,7 +147,7 @@ export default function App() {
   const [heroes, setHeroes] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [tab, setTab] = useState("card");
+  const [tab, setTab] = useState("home");
   const [selectedId, setSelectedId] = useState(null);
 
   useEffect(() => {
@@ -179,7 +181,7 @@ export default function App() {
   return (
     <div style={styles.page}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700;900&family=Rajdhani:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
         * { box-sizing: border-box; }
         html, body { overflow-x: hidden; max-width: 100%; margin: 0; padding: 0; }
         body { display: block !important; place-items: initial !important; min-width: 0 !important; }
@@ -201,50 +203,30 @@ export default function App() {
         .edge-line { transition: opacity 0.25s ease, stroke-width 0.25s ease; }
         .spin { animation: spin 1s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
-        .nav-scroll {
-          overflow-x: auto;
-          flex-wrap: nowrap !important;
-          -webkit-overflow-scrolling: touch;
-          scrollbar-width: none;
-          max-width: 100%;
+        @keyframes floatHero {
+          0%, 100% { transform: translateY(0); }
+          50% { transform: translateY(-14px); }
         }
-        .nav-scroll::-webkit-scrollbar { display: none; }
-        .nav-scroll button { flex-shrink: 0; white-space: nowrap; }
+        @keyframes pulseGlow {
+          0%, 100% { opacity: 0.6; transform: translateX(-50%) scale(1); }
+          50% { opacity: 1; transform: translateX(-50%) scale(1.1); }
+        }
+        .home-card:hover { transform: translateY(-3px); box-shadow: 0 0 40px rgba(178,75,243,0.25) !important; }
         @media (max-width: 860px) {
           .layout-cols { grid-template-columns: 1fr !important; }
           .toolbar { flex-direction: column !important; align-items: stretch !important; }
           .draft-grid { grid-template-columns: 1fr !important; }
         }
-        @media (max-width: 600px) {
-          .nav-scroll button { font-size: 12px !important; padding: 7px 10px !important; }
-          .nav-scroll button span { display: none; }
-        }
       `}</style>
 
       <header style={styles.header}>
         <div style={styles.brandRow}>
-          <div style={styles.brandMark}>DH</div>
           <div>
-            <div style={styles.brandTitle}>DRAFTHEX</div>
+            <div style={styles.brandWordmark}>DRAFTHEX</div>
             <div style={styles.brandSub}>Драфт и контрпики Dota 2</div>
           </div>
         </div>
-        <nav className="nav-scroll" style={styles.nav}>
-          {TABS.map((t) => {
-            const Icon = t.icon;
-            const active = tab === t.key;
-            return (
-              <button
-                key={t.key}
-                onClick={() => setTab(t.key)}
-                style={{ ...styles.navBtn, ...(active ? styles.navBtnActive : {}) }}
-              >
-                <Icon size={15} />
-                <span>{t.label}</span>
-              </button>
-            );
-          })}
-        </nav>
+        <PageMenu tab={tab} setTab={setTab} />
       </header>
 
       {loading && (
@@ -258,6 +240,7 @@ export default function App() {
 
       {!loading && !error && selected && (
         <>
+          {tab === "home" && <HomeTab heroes={heroes} setTab={setTab} />}
           {tab === "card" && (
             <HeroCardTab
               heroes={heroes}
@@ -286,6 +269,94 @@ export default function App() {
 }
 
 /* ---------- tab 1: hero card ---------- */
+
+/* ---------- page navigation dropdown ---------- */
+
+function PageMenu({ tab, setTab }) {
+  const [open, setOpen] = useState(false);
+  const current = TABS.find((t) => t.key === tab) || TABS[0];
+  const CurrentIcon = current.icon;
+
+  return (
+    <div style={{ position: "relative" }}>
+      <button style={styles.menuTrigger} onClick={() => setOpen((v) => !v)}>
+        <Menu size={16} />
+        <CurrentIcon size={15} />
+        <span>{current.label}</span>
+        <ChevronDown size={15} style={{ marginLeft: 4, transform: open ? "rotate(180deg)" : "none", transition: "transform 0.15s ease" }} />
+      </button>
+      {open && (
+        <>
+          <div style={styles.menuBackdrop} onClick={() => setOpen(false)} />
+          <div style={styles.menuDropdown}>
+            {TABS.map((t) => {
+              const Icon = t.icon;
+              const active = t.key === tab;
+              return (
+                <button
+                  key={t.key}
+                  style={{ ...styles.menuItem, ...(active ? styles.menuItemActive : {}) }}
+                  onClick={() => { setTab(t.key); setOpen(false); }}
+                >
+                  <Icon size={16} />
+                  {t.label}
+                </button>
+              );
+            })}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ---------- home / landing tab ---------- */
+
+const HOME_CARDS = [
+  { key: "card", title: "Карточка героя", desc: "Статы, роли и матчапы одного героя", icon: IdCard },
+  { key: "table", title: "Таблица контрпиков", desc: "Кто кого контрит и насколько сильно", icon: Table2 },
+  { key: "web", title: "Паутина", desc: "Все контрпики на одном интерактивном графе", icon: Network },
+  { key: "roles", title: "Топ по ролям", desc: "Лучшие герои по позициям и рангам", icon: Crown },
+  { key: "draft", title: "Драфт 5×5", desc: "Собери команды и получи рекомендацию пика", icon: Users },
+];
+
+function HomeTab({ heroes, setTab }) {
+  const featured = useMemo(() => heroes.find((h) => h.localized_name === "Pudge") || heroes[0], [heroes]);
+
+  return (
+    <div style={styles.homeWrap}>
+      <div style={styles.homeHero}>
+        <div style={styles.homeGlow} />
+        {featured && (
+          <div style={styles.homePortraitWrap}>
+            <HeroIcon hero={featured} field="img" style={styles.homePortrait} alt={featured.localized_name} />
+          </div>
+        )}
+        <h1 style={styles.homeTitle}>DRAFTHEX</h1>
+        <p style={styles.homeTagline}>
+          Реальная статистика OpenDota вместо догадок: контрпики, драфт 5×5 и мета — на живых данных,
+          без выдуманных советов.
+        </p>
+        <button style={styles.homeCta} onClick={() => setTab("card")}>
+          Начать <ArrowRight size={16} />
+        </button>
+      </div>
+
+      <div style={styles.homeGrid}>
+        {HOME_CARDS.map((c) => {
+          const Icon = c.icon;
+          return (
+            <button key={c.key} className="home-card" style={styles.homeCard} onClick={() => setTab(c.key)}>
+              <Icon size={22} color="#B24BF3" />
+              <div style={styles.homeCardTitle}>{c.title}</div>
+              <div style={styles.homeCardDesc}>{c.desc}</div>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 
 function HeroCardTab({ heroes, selected, selectedId, setSelectedId }) {
   const [query, setQuery] = useState("");
@@ -1060,7 +1131,9 @@ function CounterWebTab({ heroes, onPick }) {
   const [buildProgress, setBuildProgress] = useState(null);
   const [built, setBuilt] = useState(null);
   const [activeId, setActiveId] = useState(null);
-  const [zoom, setZoom] = useState(1);
+  const [zoom, setZoom] = useState(() =>
+    typeof window !== "undefined" && window.innerWidth < 640 ? 0.5 : 1
+  );
 
   async function buildGraph(nextScope) {
     const opt = SCOPE_OPTIONS.find((o) => o.key === nextScope);
@@ -1176,7 +1249,7 @@ function CounterWebTab({ heroes, onPick }) {
           <div style={styles.graphPanel}>
             <div style={styles.zoomControls}>
               <button style={styles.zoomBtn} onClick={() => setZoom((z) => Math.min(2, z + 0.2))}><ZoomIn size={14} /></button>
-              <button style={styles.zoomBtn} onClick={() => setZoom((z) => Math.max(0.6, z - 0.2))}><ZoomOut size={14} /></button>
+              <button style={styles.zoomBtn} onClick={() => setZoom((z) => Math.max(0.4, z - 0.2))}><ZoomOut size={14} /></button>
               <button style={styles.zoomBtn} onClick={() => setZoom(1)}><RotateCcw size={14} /></button>
             </div>
             <div style={styles.svgScroll}>
@@ -1291,22 +1364,72 @@ const styles = {
   },
   header: { display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 16, marginBottom: 20 },
   brandRow: { display: "flex", alignItems: "center", gap: 12 },
-  brandMark: {
-    width: 40, height: 40, borderRadius: 8, background: "linear-gradient(135deg, #C084FC, #6D28D9)",
-    display: "flex", alignItems: "center", justifyContent: "center",
-    fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, color: "#FFFFFF", fontSize: 16,
-    boxShadow: "0 0 18px rgba(178,75,243,0.55)",
+  brandWordmark: {
+    fontFamily: "'Cinzel', serif", fontWeight: 900, fontSize: 26, letterSpacing: "0.06em",
+    background: "linear-gradient(135deg, #E9D5FF, #B24BF3 55%, #6D28D9)",
+    WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent",
+    textShadow: "0 0 24px rgba(178,75,243,0.35)",
   },
-  brandTitle: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 20, letterSpacing: "0.04em" },
-  brandSub: { fontSize: 12, color: "#9C8FB0" },
-  nav: { display: "flex", gap: 6, background: "#0E081A", border: "1px solid #2C1C42", borderRadius: 10, padding: 4 },
-  navBtn: {
-    display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "none",
-    color: "#9C8FB0", fontSize: 13, padding: "8px 12px", borderRadius: 7, cursor: "pointer",
+  brandSub: { fontSize: 12, color: "#9C8FB0", fontFamily: "'Inter', sans-serif" },
+
+  menuTrigger: {
+    display: "flex", alignItems: "center", gap: 8, background: "#0E081A", border: "1px solid #2C1C42",
+    borderRadius: 10, padding: "9px 14px", color: "#F2EAFB", fontSize: 13, cursor: "pointer",
+    boxShadow: "0 0 14px rgba(178,75,243,0.12)",
   },
-  navBtnActive: { background: "#2C1C42", color: "#F2EAFB", boxShadow: "0 0 14px rgba(178,75,243,0.35)" },
+  menuBackdrop: { position: "fixed", inset: 0, zIndex: 40 },
+  menuDropdown: {
+    position: "absolute", top: "calc(100% + 8px)", right: 0, zIndex: 50, minWidth: 220,
+    background: "#150C24", border: "1px solid #2F1F49", borderRadius: 12, padding: 6,
+    boxShadow: "0 20px 50px rgba(0,0,0,0.55)", display: "flex", flexDirection: "column", gap: 2,
+  },
+  menuItem: {
+    display: "flex", alignItems: "center", gap: 10, background: "transparent", border: "none",
+    color: "#9C8FB0", fontSize: 13, padding: "10px 12px", borderRadius: 8, cursor: "pointer", textAlign: "left",
+  },
+  menuItemActive: { background: "#2C1C42", color: "#F2EAFB" },
+
   centerMsg: { display: "flex", alignItems: "center", justifyContent: "center", padding: "60px 0", color: "#9C8FB0" },
   errorBox: { background: "#1F1518", border: "1px solid #E2574C", color: "#F0B6AF", borderRadius: 8, padding: 16 },
+
+  homeWrap: { maxWidth: 1040, margin: "0 auto", display: "flex", flexDirection: "column", gap: 32 },
+  homeHero: {
+    position: "relative", textAlign: "center", padding: "48px 20px 40px",
+    display: "flex", flexDirection: "column", alignItems: "center", gap: 14, overflow: "hidden",
+  },
+  homeGlow: {
+    position: "absolute", top: "10%", left: "50%", width: 360, height: 360, transform: "translateX(-50%)",
+    background: "radial-gradient(circle, rgba(178,75,243,0.35), transparent 70%)",
+    filter: "blur(10px)", zIndex: 0, animation: "pulseGlow 4s ease-in-out infinite",
+  },
+  homePortraitWrap: { position: "relative", zIndex: 1, animation: "floatHero 5s ease-in-out infinite" },
+  homePortrait: {
+    width: 160, height: 160, borderRadius: "50%", objectFit: "cover",
+    border: "2px solid #B24BF3", boxShadow: "0 0 40px rgba(178,75,243,0.55)",
+  },
+  homeTitle: {
+    position: "relative", zIndex: 1, fontFamily: "'Cinzel', serif", fontWeight: 900,
+    fontSize: "clamp(36px, 7vw, 64px)", letterSpacing: "0.06em", margin: 0,
+    background: "linear-gradient(135deg, #F2EAFB, #C084FC 50%, #6D28D9)",
+    WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent",
+    textShadow: "0 0 40px rgba(178,75,243,0.4)",
+  },
+  homeTagline: { position: "relative", zIndex: 1, maxWidth: 520, fontSize: 15, color: "#C9BEDD", lineHeight: 1.6 },
+  homeCta: {
+    position: "relative", zIndex: 1, display: "flex", alignItems: "center", gap: 8, marginTop: 8,
+    background: "linear-gradient(135deg, #C084FC, #6D28D9)", border: "none", color: "#fff",
+    fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 15, padding: "12px 26px",
+    borderRadius: 999, cursor: "pointer", boxShadow: "0 0 24px rgba(178,75,243,0.5)",
+  },
+  homeGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 16 },
+  homeCard: {
+    display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8, textAlign: "left",
+    background: "#140B22", border: "1px solid #2F1F49", borderRadius: 14, padding: 20, cursor: "pointer",
+    boxShadow: "0 0 30px rgba(109,40,217,0.1)", transition: "transform 0.15s ease, box-shadow 0.15s ease",
+  },
+  homeCardTitle: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 16, color: "#F2EAFB" },
+  homeCardDesc: { fontSize: 12, color: "#9C8FB0", lineHeight: 1.4 },
+
   layout: { display: "grid", gridTemplateColumns: "260px 1fr", gap: 20, alignItems: "start" },
   sidebar: { background: "#0E081A", border: "1px solid #2A1A40", borderRadius: 10, padding: 8, display: "flex", flexDirection: "column", gap: 8 },
   chipList: { display: "flex", flexDirection: "column", gap: 4, maxHeight: "calc(100vh - 220px)", overflowY: "auto" },
@@ -1361,8 +1484,14 @@ const styles = {
   dropdownItem: { display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", cursor: "pointer" },
   dropdownIcon: { width: 22, height: 22, borderRadius: 4 },
   toolbar: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" },
-  segment: { display: "flex", gap: 6, background: "#0E081A", border: "1px solid #2C1C42", borderRadius: 8, padding: 4 },
-  segmentBtn: { background: "transparent", border: "none", color: "#9C8FB0", fontSize: 12, padding: "6px 10px", borderRadius: 6, cursor: "pointer" },
+  segment: {
+    display: "flex", gap: 6, background: "#0E081A", border: "1px solid #2C1C42", borderRadius: 8, padding: 4,
+    overflowX: "auto", WebkitOverflowScrolling: "touch", maxWidth: "100%",
+  },
+  segmentBtn: {
+    background: "transparent", border: "none", color: "#9C8FB0", fontSize: 12, padding: "6px 10px", borderRadius: 6,
+    cursor: "pointer", flexShrink: 0, whiteSpace: "nowrap",
+  },
   segmentBtnActive: { background: "#2C1C42", color: "#F2EAFB" },
   controls: { display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" },
   searchWrap: { display: "flex", alignItems: "center", gap: 8, background: "#140B22", border: "1px solid #2F1F49", borderRadius: 8, padding: "6px 10px" },
@@ -1439,7 +1568,7 @@ const styles = {
   graphPanel: { background: "#0E081A", border: "1px solid #2A1A40", borderRadius: 12, padding: 12, display: "flex", flexDirection: "column", gap: 8 },
   zoomControls: { display: "flex", gap: 6, justifyContent: "flex-end" },
   zoomBtn: { background: "#140B22", border: "1px solid #2F1F49", color: "#F2EAFB", borderRadius: 6, padding: 6, cursor: "pointer", display: "flex" },
-  svgScroll: { overflow: "auto", display: "flex", justifyContent: "center", maxHeight: "65vh" },
+  svgScroll: { overflow: "auto", WebkitOverflowScrolling: "touch", maxHeight: "65vh", maxWidth: "100%" },
   legend: { display: "flex", gap: 16, flexWrap: "wrap", fontSize: 11, color: "#9C8FB0", justifyContent: "center" },
   legendItem: { display: "flex", alignItems: "center", gap: 6 },
   legendLine: { width: 16, height: 3, borderRadius: 2, display: "inline-block" },
