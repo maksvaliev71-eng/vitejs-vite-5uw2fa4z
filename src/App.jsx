@@ -5,6 +5,7 @@ import {
   ChevronDown, ArrowUpDown, ZoomIn, ZoomOut, RotateCcw,
   IdCard, Network, Table2, Crown, Star, X, Plus, Users, Sparkles,
   Home, Menu, ArrowRight, ShoppingBag, BarChart3, User, MessageCircleQuestion, Lock,
+  GitCompare, BookOpen, History, Gem, Check, Handshake,
 } from "lucide-react";
 
 /* ---------- shared design tokens ---------- */
@@ -24,6 +25,53 @@ const ROLE_RU = {
 
 function img(path) {
   return `https://cdn.cloudflare.steamstatic.com${path}`;
+}
+
+/* ---------- shared UI: skeletons + toasts ---------- */
+
+function SkeletonLine({ width = "100%", height = 12, style }) {
+  return <div className="skeleton" style={{ width, height, borderRadius: 6, ...style }} />;
+}
+
+function SkeletonRows({ count = 5 }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: "4px 0" }}>
+      {Array.from({ length: count }, (_, i) => (
+        <div key={i} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <SkeletonLine width={22} height={22} style={{ borderRadius: 4, flexShrink: 0 }} />
+          <SkeletonLine width={`${45 + ((i * 13) % 35)}%`} />
+          <SkeletonLine width={38} style={{ marginLeft: "auto" }} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SkeletonBlock({ height = 200 }) {
+  return <div className="skeleton" style={{ width: "100%", height, borderRadius: 10 }} />;
+}
+
+// module-level pub/sub so any hook can raise a toast without prop drilling
+let toastListener = null;
+function notify(message) {
+  if (toastListener) toastListener(message);
+}
+
+function Toast({ message, onClose }) {
+  useEffect(() => {
+    if (!message) return;
+    const t = setTimeout(onClose, 5000);
+    return () => clearTimeout(t);
+  }, [message, onClose]);
+
+  if (!message) return null;
+  return (
+    <div style={styles.toast} role="status">
+      <Info size={15} color="#E2574C" style={{ flexShrink: 0 }} />
+      <span style={{ flex: 1 }}>{message}</span>
+      <button style={styles.toastClose} onClick={onClose} aria-label="Закрыть"><X size={14} /></button>
+    </div>
+  );
 }
 
 function HeroIcon({ hero, field = "icon", style, alt }) {
@@ -124,7 +172,10 @@ function useMatchups(heroId) {
         if (!cancelled) setState({ loading: false, data, error: null });
       })
       .catch(() => {
-        if (!cancelled) setState({ loading: false, data: null, error: "Не удалось загрузить матчапы." });
+        if (!cancelled) {
+          setState({ loading: false, data: null, error: "Не удалось загрузить матчапы." });
+          notify("Матчапы не загрузились — попробуй обновить страницу.");
+        }
       });
     return () => {
       cancelled = true;
@@ -159,6 +210,30 @@ async function getItemsCatalog() {
   return itemsCatalogPromise;
 }
 
+let abilitiesCatalogPromise = null;
+
+async function getAbilitiesCatalog() {
+  if (abilitiesCatalogPromise) return abilitiesCatalogPromise;
+  const cached = readLocalCache("dw_abilities_catalog");
+  if (cached) {
+    abilitiesCatalogPromise = Promise.resolve(cached);
+    return cached;
+  }
+  abilitiesCatalogPromise = (async () => {
+    const [abRes, heroAbRes] = await Promise.all([
+      fetch("https://unpkg.com/dotaconstants@latest/build/abilities.json"),
+      fetch("https://unpkg.com/dotaconstants@latest/build/hero_abilities.json"),
+    ]);
+    if (!abRes.ok || !heroAbRes.ok) throw new Error("network");
+    const abilities = await abRes.json(); // { ability_key: { dname, desc, img, ... } }
+    const heroAbilities = await heroAbRes.json(); // { npc_dota_hero_x: { abilities: [...], talents: [...] } }
+    const data = { abilities, heroAbilities };
+    writeLocalCache("dw_abilities_catalog", data);
+    return data;
+  })();
+  return abilitiesCatalogPromise;
+}
+
 const itemPopularityCache = new Map();
 
 async function getItemPopularity(heroId) {
@@ -188,7 +263,10 @@ function useHeroItems(heroId) {
         if (!cancelled) setState({ loading: false, popularity, catalog, error: null });
       })
       .catch(() => {
-        if (!cancelled) setState({ loading: false, popularity: null, catalog: null, error: "Не удалось загрузить данные по предметам." });
+        if (!cancelled) {
+          setState({ loading: false, popularity: null, catalog: null, error: "Не удалось загрузить данные по предметам." });
+          notify("Данные по предметам не загрузились.");
+        }
       });
     return () => {
       cancelled = true;
@@ -391,11 +469,12 @@ async function fetchPlayerBundle(accountId) {
   const cached = readLocalCache(cacheKey, PLAYER_TTL_MS);
   if (cached) return cached;
 
-  const [profileRes, wlRes, heroesRes, matchesRes] = await Promise.all([
+  const [profileRes, wlRes, heroesRes, matchesRes, peersRes] = await Promise.all([
     fetch(`https://api.opendota.com/api/players/${accountId}`),
     fetch(`https://api.opendota.com/api/players/${accountId}/wl`),
     fetch(`https://api.opendota.com/api/players/${accountId}/heroes`),
     fetch(`https://api.opendota.com/api/players/${accountId}/matches?limit=300`),
+    fetch(`https://api.opendota.com/api/players/${accountId}/peers`),
   ]);
   if (!profileRes.ok || !wlRes.ok || !heroesRes.ok || !matchesRes.ok) throw new Error("network");
 
@@ -403,8 +482,9 @@ async function fetchPlayerBundle(accountId) {
   const wl = await wlRes.json();
   const heroesPlayed = await heroesRes.json();
   const matches = await matchesRes.json();
+  const peers = peersRes.ok ? await peersRes.json() : [];
 
-  const data = { profile, wl, heroesPlayed, matches };
+  const data = { profile, wl, heroesPlayed, matches, peers };
   writeLocalCache(cacheKey, data);
   return data;
 }
@@ -423,7 +503,10 @@ function usePlayerBundle(accountId) {
         if (!cancelled) setState({ loading: false, data, error: null });
       })
       .catch(() => {
-        if (!cancelled) setState({ loading: false, data: null, error: "Не удалось загрузить профиль. Проверь ID или настройки приватности матчей в Dota 2." });
+        if (!cancelled) {
+          setState({ loading: false, data: null, error: "Не удалось загрузить профиль. Проверь ID или настройки приватности матчей в Dota 2." });
+          notify("Профиль не загрузился — проверь ID и приватность матчей.");
+        }
       });
     return () => {
       cancelled = true;
@@ -441,7 +524,11 @@ const TABS = [
   { key: "web", label: "Паутина", icon: Network },
   { key: "roles", label: "Топ по ролям", icon: Crown },
   { key: "draft", label: "Драфт 5×5", icon: Users },
+  { key: "compare", label: "Сравнить героев", icon: GitCompare },
+  { key: "reference", label: "Справочник", icon: BookOpen },
+  { key: "patches", label: "Патчи", icon: History },
   { key: "profile", label: "Мой профиль", icon: User },
+  { key: "pricing", label: "Тарифы", icon: Gem },
 ];
 
 export default function App() {
@@ -456,6 +543,30 @@ export default function App() {
   });
   const [tab, setTab] = useState(() => (steamIdFromUrl ? "profile" : "home"));
   const [selectedId, setSelectedId] = useState(null);
+  const [toast, setToast] = useState(null);
+  const [showTour, setShowTour] = useState(() => {
+    try {
+      return !localStorage.getItem("dw_tour_seen_v1");
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    toastListener = setToast;
+    return () => {
+      toastListener = null;
+    };
+  }, []);
+
+  function closeTour() {
+    setShowTour(false);
+    try {
+      localStorage.setItem("dw_tour_seen_v1", "1");
+    } catch {
+      // storage unavailable — tour will just show again next time
+    }
+  }
 
   useEffect(() => {
     const cached = readLocalCache("dw_hero_stats");
@@ -497,8 +608,11 @@ export default function App() {
         ::-webkit-scrollbar-thumb { background: #3A2857; border-radius: 4px; }
         button { font-family: 'Inter', sans-serif; }
         input:focus-visible, button:focus-visible { outline: 2px solid #B24BF3; outline-offset: 2px; }
+        .row, .role-row, .matchup-row, .side-row, .hero-chip, .suggestion-item {
+          transition: background-color 0.18s ease-out, border-color 0.18s ease-out;
+        }
         .row:hover { background: #171C24 !important; }
-        .hero-chip:hover { border-color: #3A404C !important; }
+        .hero-chip:hover { background: #17102A !important; border-color: #3A404C !important; }
         .node-btn {
           cursor: pointer;
           transition: transform 0.15s ease;
@@ -511,11 +625,9 @@ export default function App() {
         .spin { animation: spin 1s linear infinite; }
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes fadeInUp { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
-        .tab-content { animation: fadeInUp 0.25s ease; }
-        .role-row, .matchup-row, .side-row { transition: background 0.12s ease; border-radius: 6px; }
+        .tab-content { animation: fadeInUp 0.2s ease-out; }
         .role-row:hover, .side-row:hover { background: #17102A; }
-        .hero-chip:hover { background: #17102A !important; }
-        .panel, .card { transition: border-color 0.15s ease; }
+        .panel, .card { transition: border-color 0.18s ease-out; }
         @keyframes floatHero {
           0%, 100% { transform: translateY(0); }
           50% { transform: translateY(-14px); }
@@ -524,10 +636,34 @@ export default function App() {
           0%, 100% { opacity: 0.6; transform: translateX(-50%) scale(1); }
           50% { opacity: 1; transform: translateX(-50%) scale(1.1); }
         }
-        .home-card:hover { transform: translateY(-3px); box-shadow: 0 0 40px rgba(178,75,243,0.25) !important; border-color: #B24BF3 !important; }
+        @keyframes spinSlow {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+        @keyframes nodePulse {
+          0%, 100% { opacity: 0.5; transform: scale(1); }
+          50% { opacity: 1; transform: scale(1.6); }
+        }
+        .hex-node { animation: nodePulse 2.4s ease-in-out infinite; transform-box: fill-box; }
+        .home-card { transition: transform 0.18s ease-out, border-color 0.18s ease-out; will-change: transform; }
+        .home-card:hover { transform: translateY(-3px); border-color: #B24BF3 !important; }
+        .stat-box { transition: border-color 0.18s ease-out; }
         .stat-box:hover { border-color: #B24BF3 !important; }
-        .btn-lift { transition: transform 0.12s ease, box-shadow 0.12s ease; }
+        .btn-lift { transition: transform 0.15s ease-out; }
         .btn-lift:hover { transform: translateY(-1px); }
+        .skeleton {
+          background: linear-gradient(90deg, #1A1030 25%, #2A1A40 50%, #1A1030 75%);
+          background-size: 200% 100%;
+          animation: shimmer 1.4s ease-in-out infinite;
+        }
+        @keyframes shimmer {
+          from { background-position: 200% 0; }
+          to { background-position: -200% 0; }
+        }
+        @keyframes toastIn {
+          from { opacity: 0; transform: translateY(12px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
         .home-text-col { text-align: left; }
         @media (max-width: 860px) {
           .layout-cols { grid-template-columns: 1fr !important; }
@@ -542,13 +678,17 @@ export default function App() {
       `}</style>
 
       <header style={styles.header}>
-        <div style={styles.brandRow}>
-          <div>
-            <div style={styles.brandWordmark}>DRAFTHEX</div>
-            <div style={styles.brandSub}>Драфт и контрпики Dota 2</div>
+        {tab !== "home" && (
+          <div style={styles.brandRow}>
+            <div>
+              <div style={styles.brandWordmark}>DRAFTHEX</div>
+              <div style={styles.brandSub}>Драфт и контрпики Dota 2</div>
+            </div>
           </div>
+        )}
+        <div style={{ marginLeft: tab === "home" ? "auto" : 0 }}>
+          <PageMenu tab={tab} setTab={setTab} />
         </div>
-        <PageMenu tab={tab} setTab={setTab} />
       </header>
 
       {loading && (
@@ -582,11 +722,68 @@ export default function App() {
           {tab === "web" && <CounterWebTab heroes={heroes} onPick={(id) => setSelectedId(id)} />}
           {tab === "roles" && <RolesTab heroes={heroes} onPick={(id) => { setSelectedId(id); setTab("card"); }} />}
           {tab === "draft" && <DraftTab heroes={heroes} onOpenCard={(id) => { setSelectedId(id); setTab("card"); }} />}
+          {tab === "compare" && <CompareTab heroes={heroes} />}
+          {tab === "reference" && <ReferenceTab heroes={heroes} />}
+          {tab === "patches" && <PatchesTab />}
           {tab === "profile" && <ProfileTab heroes={heroes} steamIdFromUrl={steamIdFromUrl} onOpenCard={(id) => { setSelectedId(id); setTab("card"); }} />}
+          {tab === "pricing" && <PricingTab />}
         </div>
       )}
 
+      <Toast message={toast} onClose={() => setToast(null)} />
+      {showTour && <TourOverlay onClose={closeTour} onGo={(k) => { setTab(k); closeTour(); }} />}
+
       <footer style={styles.footer}>Данные: OpenDota API</footer>
+    </div>
+  );
+}
+
+/* ---------- first-visit tour ---------- */
+
+const TOUR_STEPS = [
+  { icon: IdCard, title: "Карточка героя", text: "Статы, роли, лучшие и худшие матчапы, популярные предметы и графики по линиям.", go: "card" },
+  { icon: Table2, title: "Таблица контрпиков", text: "Полный список: кто контрит героя и кого контрит он, с реальным винрейтом и фильтрами.", go: "table" },
+  { icon: Network, title: "Паутина", text: "Все связи между героями на одном графе. Тяни холст, крути колесо, ищи героя в поиске.", go: "web" },
+  { icon: Users, title: "Драфт 5×5", text: "Собери обе команды — увидишь перевес, лучший следующий пик и план на игру.", go: "draft" },
+  { icon: User, title: "Мой профиль", text: "Войди через Steam — подтянется твоя статистика: винрейт по месяцам и топ героев.", go: "profile" },
+];
+
+function TourOverlay({ onClose, onGo }) {
+  const [step, setStep] = useState(0);
+  const s = TOUR_STEPS[step];
+  const Icon = s.icon;
+  const isLast = step === TOUR_STEPS.length - 1;
+
+  return (
+    <div style={styles.tourBackdrop} onClick={onClose}>
+      <div style={styles.tourCard} onClick={(e) => e.stopPropagation()}>
+        <button style={styles.tourClose} onClick={onClose} aria-label="Закрыть"><X size={16} /></button>
+
+        <div style={styles.tourIconBadge}><Icon size={22} color="#C084FC" /></div>
+        <div style={styles.tourTitle}>{s.title}</div>
+        <div style={styles.tourText}>{s.text}</div>
+
+        <div style={styles.tourDots}>
+          {TOUR_STEPS.map((_, i) => (
+            <span key={i} style={{ ...styles.tourDot, background: i === step ? "#B24BF3" : "#3A2857" }} />
+          ))}
+        </div>
+
+        <div style={styles.tourBtnRow}>
+          <button style={styles.tourSkip} onClick={onClose}>Пропустить</button>
+          <button style={styles.tourGo} onClick={() => onGo(s.go)}>Открыть</button>
+          {!isLast && (
+            <button className="btn-lift" style={styles.homeCta} onClick={() => setStep((v) => v + 1)}>
+              Далее <ArrowRight size={15} />
+            </button>
+          )}
+          {isLast && (
+            <button className="btn-lift" style={styles.homeCta} onClick={onClose}>
+              Понятно <Check size={15} />
+            </button>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -643,25 +840,51 @@ const HOME_CARDS = [
   { key: "draft", title: "Драфт 5×5", desc: "Собери команды и получи рекомендацию пика", icon: Users },
 ];
 
-function StaticOrFallbackPortrait({ src, hero, style, className }) {
-  const [failed, setFailed] = useState(false);
-  if (failed) {
-    return <HeroIcon hero={hero} field="img" style={style} alt={hero.localized_name} />;
+function HexVisual() {
+  const nodes = useMemo(() => {
+    const count = 9;
+    return Array.from({ length: count }, (_, i) => {
+      const angle = (i / count) * Math.PI * 2;
+      const r = 78 + (i % 3) * 16;
+      return {
+        x: 150 + r * Math.cos(angle),
+        y: 150 + r * Math.sin(angle),
+        delay: (i * 0.35).toFixed(2),
+      };
+    });
+  }, []);
+
+  function hexPoints(cx, cy, r) {
+    return Array.from({ length: 6 }, (_, i) => {
+      const a = (Math.PI / 3) * i - Math.PI / 2;
+      return `${cx + r * Math.cos(a)},${cy + r * Math.sin(a)}`;
+    }).join(" ");
   }
+
   return (
-    <img
-      src={src}
-      alt={hero.localized_name}
-      className={className}
-      style={style}
-      onError={() => setFailed(true)}
-    />
+    <svg viewBox="0 0 300 300" style={styles.hexVisual}>
+      <g style={{ transformOrigin: "150px 150px", animation: "spinSlow 50s linear infinite" }}>
+        {nodes.map((n, i) => (
+          <line key={`c-${i}`} x1={150} y1={150} x2={n.x} y2={n.y} stroke="#6D28D9" strokeWidth="1" opacity="0.4" />
+        ))}
+        {nodes.map((n, i) => {
+          const next = nodes[(i + 1) % nodes.length];
+          return <line key={`r-${i}`} x1={n.x} y1={n.y} x2={next.x} y2={next.y} stroke="#B24BF3" strokeWidth="1" opacity="0.2" />;
+        })}
+        <polygon points={hexPoints(150, 150, 46)} fill="rgba(178,75,243,0.06)" stroke="#C084FC" strokeWidth="2" />
+        {nodes.map((n, i) => (
+          <circle
+            key={`n-${i}`} cx={n.x} cy={n.y} r="5" fill="#C084FC"
+            className="hex-node" style={{ animationDelay: `${n.delay}s`, transformOrigin: `${n.x}px ${n.y}px` }}
+          />
+        ))}
+      </g>
+      <polygon points={hexPoints(150, 150, 22)} fill="#B24BF3" opacity="0.9" />
+    </svg>
   );
 }
 
 function HomeTab({ heroes, setTab }) {
-  const axe = useMemo(() => heroes.find((h) => h.localized_name === "Axe") || heroes[0], [heroes]);
-
   return (
     <div style={styles.homeWrap}>
       <div className="home-hero" style={styles.homeHero}>
@@ -678,11 +901,9 @@ function HomeTab({ heroes, setTab }) {
           </button>
         </div>
 
-        {axe && (
-          <div className="hero-portrait-wrap" style={styles.homePortraitWrap}>
-            <StaticOrFallbackPortrait src="/axe-hero.png" hero={axe} style={styles.homePortraitStatic} />
-          </div>
-        )}
+        <div className="hero-portrait-wrap" style={styles.homePortraitWrap}>
+          <HexVisual />
+        </div>
       </div>
 
       <div style={styles.homeGrid}>
@@ -797,9 +1018,8 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
       {parseError && <div style={styles.errorBox}>{parseError}</div>}
 
       {loading && (
-        <div style={styles.centerMsg}>
-          <Loader2 className="spin" size={20} color="#B24BF3" />
-          <span style={{ marginLeft: 10 }}>Загружаю профиль…</span>
+        <div style={styles.panel}>
+          <SkeletonRows count={5} />
         </div>
       )}
       {error && <div style={styles.errorBox}>{error}</div>}
@@ -866,8 +1086,50 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
               </div>
             ))}
           </div>
+
+          <PeersPanel peers={data.peers} />
         </>
       )}
+    </div>
+  );
+}
+
+function PeersPanel({ peers }) {
+  const top = useMemo(() => {
+    if (!Array.isArray(peers)) return [];
+    return peers
+      .filter((p) => p.games >= 5 && p.personaname)
+      .map((p) => ({ ...p, winRate: p.win / p.games }))
+      .sort((a, b) => b.games - a.games)
+      .slice(0, 10);
+  }, [peers]);
+
+  if (top.length === 0) return null;
+
+  return (
+    <div style={styles.panel}>
+      <div style={styles.panelHeader}>
+        <Handshake size={16} color="#B24BF3" />
+        <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Синергия с союзниками</span>
+      </div>
+      {top.map((p) => (
+        <div key={p.account_id} style={styles.roleRow}>
+          {p.avatar ? (
+            <img src={p.avatar} alt="" style={styles.matchupIcon} onError={(e) => { e.currentTarget.style.visibility = "hidden"; }} />
+          ) : (
+            <div style={{ ...styles.matchupIcon, background: "#2A1A40" }} />
+          )}
+          <span style={styles.matchupName}>{p.personaname}</span>
+          <span style={styles.mutedText}>{p.games} игр</span>
+          <span style={{ ...styles.rolePct, color: p.winRate >= 0.5 ? "#5FCB8E" : "#E2574C" }}>
+            {(p.winRate * 100).toFixed(0)}%
+          </span>
+        </div>
+      ))}
+      <div style={{ ...styles.mutedText, fontSize: 11, marginTop: 8 }}>
+        Реальные тиммейты, с которыми ты сыграл 5+ матчей, и твой винрейт вместе с ними.
+        Синергия по конкретным парам героев — отдельная задача: для неё нужно тянуть детали каждого матча.
+      </div>
     </div>
   );
 }
@@ -1071,7 +1333,7 @@ function ItemsPanel({ heroId }) {
         <ShoppingBag size={16} color="#B24BF3" />
         <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Популярные предметы</span>
       </div>
-      {loading && <div style={styles.mutedText}>Загрузка…</div>}
+      {loading && <SkeletonRows count={4} />}
       {error && <div style={styles.mutedText}>{error}</div>}
       {!loading && !error && popularity && catalog && (
         <div style={styles.itemCatGrid}>
@@ -1146,7 +1408,7 @@ function LaneRoleChart({ heroId }) {
         <BarChart3 size={16} color="#B24BF3" />
         <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Винрейт по линиям</span>
       </div>
-      {loading && <div style={styles.mutedText}>Загрузка…</div>}
+      {loading && <SkeletonRows count={4} />}
       {error && <div style={styles.mutedText}>{error}</div>}
       {!loading && !error && chartData.length === 0 && (
         <div style={styles.mutedText}>Недостаточно данных по линиям для этого героя.</div>
@@ -1212,7 +1474,7 @@ function MatchupPanel({ title, icon, accent, items, loading, heroById, labelFor 
         {icon}
         <span style={{ ...styles.panelTitle, color: accent }}>{title}</span>
       </div>
-      {loading && <div style={styles.mutedText}>Загрузка…</div>}
+      {loading && <SkeletonRows count={4} />}
       {!loading && items.length === 0 && <div style={styles.emptyState}>Недостаточно данных про-матчей.</div>}
       {!loading &&
         items.map((m) => {
@@ -1937,9 +2199,8 @@ function CounterTableTab({ heroes, selected, selectedId, setSelectedId }) {
 
       <div style={styles.tableWrap}>
         {loading && (
-          <div style={styles.centerMsg}>
-            <Loader2 className="spin" size={18} color="#B24BF3" />
-            <span style={{ marginLeft: 10 }}>Считаю матчапы…</span>
+          <div style={{ padding: 14 }}>
+            <SkeletonRows count={6} />
           </div>
         )}
         {error && <div style={styles.errorBox}>{error}</div>}
@@ -2145,7 +2406,7 @@ function CounterWebTab({ heroes, onPick }) {
       const availW = containerRef.current.clientWidth - 16;
       const availH = containerRef.current.clientHeight - 16;
       if (availW > 0 && availH > 0) {
-        const z = Math.max(0.3, Math.min(1, Math.min(availW / size, availH / size)));
+        const z = Math.max(0.3, Math.min(1.8, Math.min(availW / size, availH / size)));
         setZoom(z);
         setPan({ x: (availW - size * z) / 2, y: (availH - size * z) / 2 });
       }
@@ -2377,7 +2638,568 @@ function CounterWebTab({ heroes, onPick }) {
 
 /* ---------- styles ---------- */
 
+/* ---------- tab: reference (abilities + items, from dotaconstants) ---------- */
+
+function ReferenceTab({ heroes }) {
+  const [mode, setMode] = useState("abilities");
+  const [heroId, setHeroId] = useState(null);
+  const [query, setQuery] = useState("");
+  const [state, setState] = useState({ loading: true, abilities: null, items: null, error: null });
+
+  useEffect(() => {
+    if (heroes.length && heroId == null) setHeroId(heroes[0].id);
+  }, [heroes, heroId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setState((s) => ({ ...s, loading: true, error: null }));
+    Promise.all([getAbilitiesCatalog(), getItemsCatalog()])
+      .then(([ab, it]) => {
+        if (!cancelled) setState({ loading: false, abilities: ab, items: it, error: null });
+      })
+      .catch(() => {
+        if (!cancelled) setState({ loading: false, abilities: null, items: null, error: "Не удалось загрузить справочник." });
+        notify("Справочник не загрузился — проверь подключение.");
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const hero = heroes.find((h) => h.id === heroId) || null;
+
+  const heroAbilityList = useMemo(() => {
+    if (!state.abilities || !hero) return [];
+    const entry = state.abilities.heroAbilities[hero.name];
+    if (!entry || !entry.abilities) return [];
+    return entry.abilities
+      .map((key) => ({ key, data: state.abilities.abilities[key] }))
+      .filter((a) => a.data && a.data.dname);
+  }, [state.abilities, hero]);
+
+  const itemList = useMemo(() => {
+    if (!state.items) return [];
+    const q = query.trim().toLowerCase();
+    return Object.entries(state.items.items)
+      .map(([key, data]) => ({ key, data }))
+      .filter((i) => i.data && i.data.dname && i.data.cost)
+      .filter((i) => (q ? i.data.dname.toLowerCase().includes(q) : true))
+      .sort((a, b) => (b.data.cost || 0) - (a.data.cost || 0))
+      .slice(0, 60);
+  }, [state.items, query]);
+
+  return (
+    <div style={styles.body}>
+      <div style={styles.segment}>
+        <button
+          style={{ ...styles.segmentBtn, ...(mode === "abilities" ? styles.segmentBtnActive : {}) }}
+          onClick={() => setMode("abilities")}
+        >
+          Способности
+        </button>
+        <button
+          style={{ ...styles.segmentBtn, ...(mode === "items" ? styles.segmentBtnActive : {}) }}
+          onClick={() => setMode("items")}
+        >
+          Предметы
+        </button>
+      </div>
+
+      {state.loading && <SkeletonBlock height={260} />}
+      {state.error && <div style={styles.emptyState}>{state.error}</div>}
+
+      {!state.loading && !state.error && mode === "abilities" && hero && (
+        <>
+          <div style={styles.heroSelectWrap}>
+            <span style={styles.heroSelectLabel}>Герой:</span>
+            <ComparePicker heroes={heroes} selectedId={heroId} onSelect={setHeroId} align="left" />
+          </div>
+
+          <div style={styles.panel}>
+            <div style={styles.panelHeader}>
+              <BookOpen size={16} color="#B24BF3" />
+              <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Способности {hero.localized_name}</span>
+            </div>
+            {heroAbilityList.length === 0 && <div style={styles.emptyState}>Нет данных по способностям этого героя.</div>}
+            {heroAbilityList.map(({ key, data }) => (
+              <div key={key} style={styles.abilityRow}>
+                {data.img && (
+                  <img
+                    src={img(data.img)}
+                    alt=""
+                    style={styles.abilityIcon}
+                    onError={(e) => { e.currentTarget.style.visibility = "hidden"; }}
+                  />
+                )}
+                <div style={{ minWidth: 0 }}>
+                  <div style={styles.abilityName}>{data.dname}</div>
+                  {data.desc && <div style={styles.abilityDesc}>{data.desc}</div>}
+                  {data.dmg_type && <div style={styles.abilityMeta}>Тип урона: {data.dmg_type}</div>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      {!state.loading && !state.error && mode === "items" && (
+        <>
+          <div style={styles.searchWrap}>
+            <Search size={14} color="#9C8FB0" />
+            <input
+              style={styles.searchInput}
+              placeholder="Найти предмет…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </div>
+
+          <div style={styles.panel}>
+            <div style={styles.panelHeader}>
+              <ShoppingBag size={16} color="#B24BF3" />
+              <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Предметы</span>
+            </div>
+            {itemList.length === 0 && <div style={styles.emptyState}>Ничего не нашлось.</div>}
+            {itemList.map(({ key, data }) => (
+              <div key={key} style={styles.abilityRow}>
+                {data.img && (
+                  <img
+                    src={img(data.img)}
+                    alt=""
+                    style={styles.itemIconLg}
+                    onError={(e) => { e.currentTarget.style.visibility = "hidden"; }}
+                  />
+                )}
+                <div style={{ minWidth: 0 }}>
+                  <div style={styles.abilityName}>
+                    {data.dname} <span style={styles.itemCost}>{data.cost} золота</span>
+                  </div>
+                  {data.notes && <div style={styles.abilityDesc}>{data.notes}</div>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
+      <div style={styles.methodNote}>
+        <Info size={13} color="#9C8FB0" style={{ flexShrink: 0, marginTop: 2 }} />
+        <span>
+          Описания способностей и предметов — из открытой базы dotaconstants (данные самой игры).
+          Это справочник фактов, а не аналитика: тут нет оценок «сильно/слабо», только то, что предмет
+          или способность реально делает.
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- tab: patch history ---------- */
+
+function PatchesTab() {
+  const [state, setState] = useState({ loading: true, patches: null, error: null });
+
+  useEffect(() => {
+    let cancelled = false;
+    const cached = readLocalCache("dw_all_patches");
+    if (cached) {
+      setState({ loading: false, patches: cached, error: null });
+      return;
+    }
+    fetch("https://api.opendota.com/api/constants/patch")
+      .then((r) => {
+        if (!r.ok) throw new Error("network");
+        return r.json();
+      })
+      .then((data) => {
+        writeLocalCache("dw_all_patches", data);
+        if (!cancelled) setState({ loading: false, patches: data, error: null });
+      })
+      .catch(() => {
+        if (!cancelled) setState({ loading: false, patches: null, error: "Не удалось загрузить список патчей." });
+        notify("Список патчей не загрузился.");
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const list = useMemo(() => {
+    if (!state.patches) return [];
+    return [...state.patches].reverse().slice(0, 40);
+  }, [state.patches]);
+
+  return (
+    <div style={styles.body}>
+      <div style={styles.panel}>
+        <div style={styles.panelHeader}>
+          <History size={16} color="#B24BF3" />
+          <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>История патчей</span>
+        </div>
+        {state.loading && <SkeletonRows count={6} />}
+        {state.error && <div style={styles.emptyState}>{state.error}</div>}
+        {!state.loading && !state.error && list.map((p, i) => {
+          const d = p.date ? new Date(p.date) : null;
+          return (
+            <div key={p.name} style={styles.patchRow}>
+              <span style={{ ...styles.patchDot, background: i === 0 ? "#B24BF3" : "#3A2857" }} />
+              <span style={styles.patchName}>{p.name}</span>
+              {i === 0 && <span style={styles.patchCurrent}>текущий</span>}
+              <span style={styles.patchDate}>
+                {d ? d.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" }) : "—"}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={styles.methodNote}>
+        <Info size={13} color="#9C8FB0" style={{ flexShrink: 0, marginTop: 2 }} />
+        <span>
+          Здесь только номера патчей и даты выхода — это всё, что отдаёт открытый API. Полных текстов
+          патчноутов в нём нет, придумывать их я не буду. Сами changelog'и Valve публикует на
+          официальном сайте Dota 2.
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- tab: pricing ---------- */
+
+const FREE_FEATURES = [
+  "Карточка героя: статы, роли, матчапы",
+  "Таблица контрпиков с фильтрами",
+  "Интерактивная паутина",
+  "Топ по ролям и топ банов",
+  "Драфт 5×5: перевес и рекомендация пика",
+  "Справочник способностей и предметов",
+  "Базовый профиль по Steam",
+];
+
+const PRO_FEATURES = [
+  "AI-разбор всего драфта целиком, а не одного пика",
+  "Углублённый профиль: тренды по позициям и периодам",
+  "Синергия с конкретными союзниками",
+  "История сохранённых драфтов",
+  "Помесячные тренды и статистика по патчам",
+  "Безлимитный пул героев",
+];
+
+function PricingTab() {
+  return (
+    <div style={styles.body}>
+      <div style={styles.pricingHead}>
+        <h2 style={styles.pricingTitle}>Тарифы</h2>
+        <p style={styles.mutedText}>
+          Всё, что работает на открытых данных, остаётся бесплатным. Платное — то, что стоит
+          вычислительных ресурсов: AI-разборы и тяжёлые запросы к базе.
+        </p>
+      </div>
+
+      <div style={styles.pricingGrid}>
+        <div style={styles.panel}>
+          <div style={styles.panelHeader}>
+            <Check size={16} color="#5FCB8E" />
+            <span style={{ ...styles.panelTitle, color: "#5FCB8E" }}>Бесплатно</span>
+          </div>
+          <div style={styles.pricingPrice}>0 ₽<span style={styles.pricingPer}> / навсегда</span></div>
+          {FREE_FEATURES.map((f) => (
+            <div key={f} style={styles.pricingRow}>
+              <Check size={14} color="#5FCB8E" style={{ flexShrink: 0, marginTop: 2 }} />
+              <span>{f}</span>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ ...styles.panel, border: "1px solid #4A3D1E" }}>
+          <div style={styles.panelHeader}>
+            <Gem size={16} color="#E5B33D" />
+            <span style={{ ...styles.panelTitle, color: "#E5B33D" }}>Premium</span>
+          </div>
+          <div style={styles.pricingPrice}>
+            скоро<span style={styles.pricingPer}> / в разработке</span>
+          </div>
+          {PRO_FEATURES.map((f) => (
+            <div key={f} style={styles.pricingRow}>
+              <Gem size={13} color="#E5B33D" style={{ flexShrink: 0, marginTop: 3 }} />
+              <span>{f}</span>
+            </div>
+          ))}
+          <button style={{ ...styles.premiumBtn, marginLeft: 0, marginTop: 14 }} disabled>
+            <Lock size={11} /> Подписка пока недоступна
+          </button>
+        </div>
+      </div>
+
+      <div style={styles.methodNote}>
+        <Info size={13} color="#9C8FB0" style={{ flexShrink: 0, marginTop: 2 }} />
+        <span>
+          Платёжная система ещё не подключена — это описание планируемых тарифов, а не работающая
+          покупка. Ничего оплатить сейчас нельзя.
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/* ---------- tab: compare two heroes ---------- */
+
+function CompareTab({ heroes }) {
+  const [leftId, setLeftId] = useState(null);
+  const [rightId, setRightId] = useState(null);
+
+  useEffect(() => {
+    if (heroes.length && leftId == null) {
+      setLeftId(heroes[0].id);
+      setRightId(heroes[1] ? heroes[1].id : heroes[0].id);
+    }
+  }, [heroes, leftId]);
+
+  const left = heroes.find((h) => h.id === leftId) || null;
+  const right = heroes.find((h) => h.id === rightId) || null;
+
+  const { data: leftMatchups, loading: leftLoading } = useMatchups(leftId);
+
+  const headToHead = useMemo(() => {
+    if (!leftMatchups || !rightId) return null;
+    const m = leftMatchups.find((x) => x.hero_id === rightId);
+    if (!m || !m.games_played) return null;
+    return { winRate: m.wins / m.games_played, games: m.games_played };
+  }, [leftMatchups, rightId]);
+
+  function proWr(h) {
+    return h && h.pro_pick ? (h.pro_win / h.pro_pick) * 100 : null;
+  }
+
+  const rows = [
+    { label: "Проф. винрейт", l: proWr(left), r: proWr(right), fmt: (v) => (v == null ? "—" : `${v.toFixed(1)}%`), higher: true },
+    { label: "Проф. пики", l: left?.pro_pick ?? null, r: right?.pro_pick ?? null, fmt: (v) => (v == null ? "—" : v), higher: true },
+    { label: "Проф. баны", l: left?.pro_ban ?? null, r: right?.pro_ban ?? null, fmt: (v) => (v == null ? "—" : v), higher: true },
+    { label: "Базовое здоровье", l: left?.base_health ?? null, r: right?.base_health ?? null, fmt: (v) => v ?? "—", higher: true },
+    { label: "Базовая броня", l: left?.base_armor ?? null, r: right?.base_armor ?? null, fmt: (v) => v ?? "—", higher: true },
+    { label: "Скорость передвижения", l: left?.move_speed ?? null, r: right?.move_speed ?? null, fmt: (v) => v ?? "—", higher: true },
+    { label: "Дальность атаки", l: left?.attack_range ?? null, r: right?.attack_range ?? null, fmt: (v) => v ?? "—", higher: true },
+  ];
+
+  if (!left || !right) return null;
+
+  return (
+    <div style={styles.body}>
+      <div style={styles.compareHeadRow}>
+        <ComparePicker heroes={heroes} selectedId={leftId} onSelect={setLeftId} align="left" />
+        <div style={styles.compareVs}>VS</div>
+        <ComparePicker heroes={heroes} selectedId={rightId} onSelect={setRightId} align="right" />
+      </div>
+
+      <div style={styles.panel}>
+        <div style={styles.panelHeader}>
+          <Swords size={16} color="#B24BF3" />
+          <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Прямой матчап</span>
+        </div>
+        {leftLoading && <SkeletonRows count={1} />}
+        {!leftLoading && !headToHead && (
+          <div style={styles.emptyState}>Нет данных по этой конкретной паре героев.</div>
+        )}
+        {!leftLoading && headToHead && (
+          <div style={styles.h2hRow}>
+            <span style={{ ...styles.h2hSide, color: headToHead.winRate >= 0.5 ? "#5FCB8E" : "#9C8FB0" }}>
+              {(headToHead.winRate * 100).toFixed(1)}%
+            </span>
+            <div style={styles.h2hBarTrack}>
+              <div style={{ ...styles.h2hBarFill, width: `${headToHead.winRate * 100}%` }} />
+            </div>
+            <span style={{ ...styles.h2hSide, color: headToHead.winRate < 0.5 ? "#5FCB8E" : "#9C8FB0" }}>
+              {((1 - headToHead.winRate) * 100).toFixed(1)}%
+            </span>
+          </div>
+        )}
+        {headToHead && (
+          <div style={{ ...styles.mutedText, fontSize: 11, textAlign: "center", marginTop: 6 }}>
+            По {headToHead.games} проф. матчам, где герои встречались
+          </div>
+        )}
+      </div>
+
+      <div style={styles.panel}>
+        <div style={styles.panelHeader}>
+          <BarChart3 size={16} color="#B24BF3" />
+          <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Характеристики</span>
+        </div>
+        {rows.map((row) => {
+          const lWins = row.l != null && row.r != null && row.l !== row.r && (row.higher ? row.l > row.r : row.l < row.r);
+          const rWins = row.l != null && row.r != null && row.l !== row.r && !lWins;
+          return (
+            <div key={row.label} style={styles.compareRow}>
+              <span style={{ ...styles.compareVal, color: lWins ? "#5FCB8E" : "#F2EAFB", fontWeight: lWins ? 700 : 500 }}>
+                {row.fmt(row.l)}
+              </span>
+              <span style={styles.compareLabel}>{row.label}</span>
+              <span style={{ ...styles.compareVal, textAlign: "right", color: rWins ? "#5FCB8E" : "#F2EAFB", fontWeight: rWins ? 700 : 500 }}>
+                {row.fmt(row.r)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={styles.methodNote}>
+        <Info size={13} color="#9C8FB0" style={{ flexShrink: 0, marginTop: 2 }} />
+        <span>
+          Характеристики — базовые значения героев из OpenDota (без учёта уровня, талантов и предметов).
+          Прямой матчап считается только по матчам, где эти двое реально встречались в проф. играх.
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function ComparePicker({ heroes, selectedId, onSelect, align }) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const hero = heroes.find((h) => h.id === selectedId);
+  const attr = hero ? ATTR[hero.primary_attr] || ATTR.all : ATTR.all;
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return heroes;
+    return heroes.filter((h) => h.localized_name.toLowerCase().includes(q));
+  }, [heroes, query]);
+
+  if (!hero) return null;
+
+  return (
+    <div style={{ position: "relative", flex: 1, minWidth: 0 }}>
+      <button
+        style={{ ...styles.compareCard, borderColor: attr.color, alignItems: align === "right" ? "flex-end" : "flex-start" }}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <HeroIcon hero={hero} field="img" style={styles.comparePortrait} alt={hero.localized_name} />
+        <span style={styles.compareName}>{hero.localized_name}</span>
+        <span style={{ ...styles.tag, color: attr.color, borderColor: attr.color }}>{attr.label}</span>
+      </button>
+
+      {open && (
+        <>
+          <div style={styles.menuBackdrop} onClick={() => setOpen(false)} />
+          <div style={{ ...styles.dropdown, left: align === "right" ? "auto" : 0, right: align === "right" ? 0 : "auto" }}>
+            <div style={styles.dropdownSearch}>
+              <Search size={14} color="#9C8FB0" />
+              <input
+                autoFocus
+                style={styles.dropdownInput}
+                placeholder="Найти героя…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+            </div>
+            <div style={styles.dropdownList}>
+              {filtered.map((h) => (
+                <div
+                  key={h.id}
+                  style={styles.dropdownItem}
+                  onClick={() => { onSelect(h.id); setOpen(false); setQuery(""); }}
+                >
+                  <HeroIcon hero={h} style={styles.dropdownIcon} />
+                  <span style={{ fontSize: 13 }}>{h.localized_name}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 const styles = {
+  /* toast */
+  toast: {
+    position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)", zIndex: 200,
+    display: "flex", alignItems: "center", gap: 10, background: "#1B0F1A", border: "1px solid #5A2430",
+    color: "#F0D9DC", borderRadius: 10, padding: "11px 14px", fontSize: 13,
+    boxShadow: "0 12px 30px rgba(0,0,0,0.55)", maxWidth: "min(420px, calc(100vw - 32px))",
+    animation: "toastIn 0.2s ease-out",
+  },
+  toastClose: { background: "transparent", border: "none", color: "#9C8FB0", cursor: "pointer", display: "flex", padding: 2 },
+
+  /* tour */
+  tourBackdrop: {
+    position: "fixed", inset: 0, background: "rgba(5,3,10,0.78)", zIndex: 150,
+    display: "flex", alignItems: "center", justifyContent: "center", padding: 20,
+  },
+  tourCard: {
+    position: "relative", background: "#150C24", border: "1px solid #2F1F49", borderRadius: 16,
+    padding: "28px 26px 22px", width: "min(420px, 92vw)", textAlign: "center",
+    boxShadow: "0 24px 60px rgba(0,0,0,0.6)",
+  },
+  tourClose: {
+    position: "absolute", top: 12, right: 12, background: "transparent", border: "none",
+    color: "#6E5F86", cursor: "pointer", display: "flex", padding: 4,
+  },
+  tourIconBadge: {
+    width: 52, height: 52, borderRadius: 14, margin: "0 auto 14px",
+    display: "flex", alignItems: "center", justifyContent: "center",
+    background: "linear-gradient(135deg, rgba(178,75,243,0.2), rgba(109,40,217,0.08))",
+    border: "1px solid #3A2857",
+  },
+  tourTitle: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 20, marginBottom: 8 },
+  tourText: { fontSize: 13, color: "#C9BEDD", lineHeight: 1.55 },
+  tourDots: { display: "flex", gap: 6, justifyContent: "center", margin: "18px 0 16px" },
+  tourDot: { width: 7, height: 7, borderRadius: "50%" },
+  tourBtnRow: { display: "flex", alignItems: "center", justifyContent: "center", gap: 10, flexWrap: "wrap" },
+  tourSkip: { background: "transparent", border: "none", color: "#6E5F86", fontSize: 12, cursor: "pointer" },
+  tourGo: {
+    background: "transparent", border: "1px solid #3A2857", color: "#C9BEDD", fontSize: 12,
+    padding: "9px 14px", borderRadius: 999, cursor: "pointer",
+  },
+
+  /* compare */
+  compareHeadRow: { display: "flex", alignItems: "center", gap: 12 },
+  compareVs: {
+    fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 18, color: "#6E5F86", flexShrink: 0,
+  },
+  compareCard: {
+    width: "100%", display: "flex", flexDirection: "column", gap: 8, padding: 16,
+    background: "#140B22", border: "1px solid", borderRadius: 14, cursor: "pointer", color: "#F2EAFB",
+  },
+  comparePortrait: { width: 64, height: 64, borderRadius: 10, objectFit: "cover" },
+  compareName: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 17 },
+  compareRow: {
+    display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: "1px solid #241636",
+  },
+  compareVal: { fontSize: 14, width: 90, flexShrink: 0, fontFamily: "'Rajdhani', sans-serif" },
+  compareLabel: { flex: 1, textAlign: "center", fontSize: 12, color: "#9C8FB0" },
+  h2hRow: { display: "flex", alignItems: "center", gap: 12 },
+  h2hSide: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 17, width: 62, flexShrink: 0 },
+  h2hBarTrack: { flex: 1, height: 8, borderRadius: 4, background: "#E2574C", overflow: "hidden" },
+  h2hBarFill: { height: "100%", background: "#5FCB8E" },
+
+  /* reference */
+  abilityRow: {
+    display: "flex", gap: 12, padding: "12px 0", borderBottom: "1px solid #241636", alignItems: "flex-start",
+  },
+  abilityIcon: { width: 42, height: 42, borderRadius: 8, flexShrink: 0, background: "#0E081A" },
+  itemIconLg: { width: 48, height: 36, borderRadius: 6, objectFit: "cover", flexShrink: 0, background: "#0E081A" },
+  abilityName: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 15, marginBottom: 4 },
+  abilityDesc: { fontSize: 12, color: "#9C8FB0", lineHeight: 1.5 },
+  abilityMeta: { fontSize: 11, color: "#6E5F86", marginTop: 4 },
+  itemCost: { fontSize: 11, color: "#E5B33D", fontWeight: 600, marginLeft: 6 },
+
+  /* patches */
+  patchRow: { display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: "1px solid #241636" },
+  patchDot: { width: 8, height: 8, borderRadius: "50%", flexShrink: 0 },
+  patchName: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 14 },
+  patchCurrent: {
+    fontSize: 9, color: "#B24BF3", border: "1px solid #B24BF3", borderRadius: 999,
+    padding: "1px 7px", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em",
+  },
+  patchDate: { marginLeft: "auto", fontSize: 12, color: "#9C8FB0" },
+
+  /* pricing */
+  pricingHead: { textAlign: "center", maxWidth: 560, margin: "0 auto" },
+  pricingTitle: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 30, margin: "0 0 8px" },
+  pricingGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 16 },
+  pricingPrice: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 28, marginBottom: 14 },
+  pricingPer: { fontSize: 12, color: "#9C8FB0", fontWeight: 500 },
+  pricingRow: { display: "flex", gap: 9, alignItems: "flex-start", fontSize: 13, padding: "6px 0", lineHeight: 1.45 },
+
   page: {
     minHeight: "100vh",
     width: "100%",
@@ -2397,8 +3219,7 @@ const styles = {
   header: { display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 16, marginBottom: 20 },
   brandRow: { display: "flex", alignItems: "center", gap: 12 },
   brandWordmark: {
-    fontFamily: "'Playfair Display', serif", fontStyle: "italic", fontWeight: 700, fontSize: 26, letterSpacing: "0.02em",
-    lineHeight: 1.3, paddingLeft: 2,
+    fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 24, letterSpacing: "0.08em",
     background: "linear-gradient(135deg, #E9D5FF, #B24BF3 55%, #6D28D9)",
     WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent",
     textShadow: "0 0 24px rgba(178,75,243,0.35)",
@@ -2412,7 +3233,7 @@ const styles = {
   },
   menuBackdrop: { position: "fixed", inset: 0, zIndex: 40 },
   menuDropdown: {
-    position: "absolute", top: "calc(100% + 8px)", right: 0, zIndex: 50, minWidth: 220,
+    position: "absolute", top: "calc(100% + 8px)", right: 0, zIndex: 50, minWidth: 220, maxWidth: "calc(100vw - 32px)",
     background: "#150C24", border: "1px solid #2F1F49", borderRadius: 12, padding: 6,
     boxShadow: "0 20px 50px rgba(0,0,0,0.55)", display: "flex", flexDirection: "column", gap: 2,
   },
@@ -2428,7 +3249,7 @@ const styles = {
   homeWrap: { maxWidth: 1040, margin: "0 auto", display: "flex", flexDirection: "column", gap: 32 },
   homeHero: {
     position: "relative", padding: "40px 20px",
-    display: "flex", alignItems: "center", gap: 0,
+    display: "flex", alignItems: "center", gap: 40,
   },
   homeGlow: {
     position: "absolute", top: "10%", left: "18%", width: 360, height: 360, transform: "translateX(-50%)",
@@ -2436,21 +3257,21 @@ const styles = {
     filter: "blur(10px)", zIndex: 0, animation: "pulseGlow 4s ease-in-out infinite",
   },
   homePortraitWrap: {
-    position: "relative", zIndex: 3, flexShrink: 0, marginLeft: -70, marginRight: -20,
-    animation: "floatHero 5s ease-in-out infinite", pointerEvents: "none",
+    position: "relative", zIndex: 1, flexShrink: 0,
+    animation: "floatHero 6s ease-in-out infinite", pointerEvents: "none",
+  },
+  hexVisual: {
+    width: "clamp(220px, 26vw, 320px)", height: "auto",
+    filter: "drop-shadow(0 0 25px rgba(178,75,243,0.35))",
   },
   homePortrait: {
     width: 260, height: "auto", maxHeight: 380, objectFit: "contain",
     filter: "drop-shadow(0 0 45px rgba(178,75,243,0.5))",
   },
-  homePortraitStatic: {
-    width: "clamp(220px, 26vw, 340px)", height: "auto", maxHeight: 420, objectFit: "contain",
-    filter: "drop-shadow(0 15px 25px rgba(0,0,0,0.5)) drop-shadow(0 0 35px rgba(178,75,243,0.4))",
-  },
   homeTextCol: { position: "relative", zIndex: 1, flex: 1, minWidth: 0 },
   homeTitle: {
-    fontFamily: "'Playfair Display', serif", fontStyle: "italic", fontWeight: 700,
-    fontSize: "clamp(34px, 6vw, 58px)", letterSpacing: "0.01em", margin: 0, lineHeight: 1.25, paddingLeft: 4,
+    fontFamily: "'Rajdhani', sans-serif", fontWeight: 700,
+    fontSize: "clamp(38px, 6.5vw, 64px)", letterSpacing: "0.06em", margin: 0, lineHeight: 1.1,
     background: "linear-gradient(135deg, #F2EAFB, #C084FC 50%, #6D28D9)",
     WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent",
     textShadow: "0 0 40px rgba(178,75,243,0.4)",
@@ -2467,7 +3288,7 @@ const styles = {
     position: "relative", display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 10, textAlign: "left",
     background: "linear-gradient(160deg, #170D28, #120A1E)", border: "1px solid #2F1F49", borderRadius: 14, padding: 20,
     cursor: "pointer", overflow: "hidden",
-    boxShadow: "0 0 30px rgba(109,40,217,0.1)", transition: "transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease",
+    boxShadow: "0 0 30px rgba(109,40,217,0.1)",
   },
   homeCardIconBadge: {
     display: "flex", alignItems: "center", justifyContent: "center", width: 40, height: 40, borderRadius: 10,
@@ -2531,7 +3352,7 @@ const styles = {
   heroSelectIcon: { width: 24, height: 24, borderRadius: 4 },
   heroSelectName: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 600, fontSize: 15 },
   dropdown: {
-    position: "absolute", top: "calc(100% + 6px)", left: 0, zIndex: 10, width: 280, background: "#150C24",
+    position: "absolute", top: "calc(100% + 6px)", left: 0, zIndex: 10, width: "min(280px, 90vw)", background: "#150C24",
     border: "1px solid #2F1F49", borderRadius: 10, boxShadow: "0 12px 30px rgba(0,0,0,0.5)", overflow: "hidden",
   },
   dropdownSearch: { display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderBottom: "1px solid #2F1F49" },
@@ -2644,7 +3465,7 @@ const styles = {
     alignItems: "center", justifyContent: "center", zIndex: 50, padding: 20,
   },
   pickerModal: {
-    background: "#150C24", border: "1px solid #2F1F49", borderRadius: 14, width: 360, maxHeight: "70vh",
+    background: "#150C24", border: "1px solid #2F1F49", borderRadius: 14, width: "min(360px, 92vw)", maxHeight: "70vh",
     display: "flex", flexDirection: "column", boxShadow: "0 20px 60px rgba(0,0,0,0.6)",
   },
   pickerHeader: { display: "flex", alignItems: "center", gap: 8, padding: "12px 14px", borderBottom: "1px solid #2F1F49" },
