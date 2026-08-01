@@ -234,6 +234,129 @@ async function getItemsCatalog() {
   return itemsCatalogPromise;
 }
 
+let patchNotesPromise = null;
+
+async function getPatchNotes() {
+  if (patchNotesPromise) return patchNotesPromise;
+  const cached = readLocalCache("dw_patchnotes");
+  if (cached) {
+    patchNotesPromise = Promise.resolve(cached);
+    return cached;
+  }
+  patchNotesPromise = (async () => {
+    const r = await fetch("https://unpkg.com/dotaconstants@latest/build/patchnotes.json");
+    if (!r.ok) throw new Error("network");
+    const data = await r.json();
+    try {
+      writeLocalCache("dw_patchnotes", data);
+    } catch {
+      // may exceed storage quota — fine, we just refetch next time
+    }
+    return data;
+  })();
+  return patchNotesPromise;
+}
+
+/* patchnotes.json groups changes by patch, then by hero/item key. The exact nesting has
+   changed across versions, so this flattens whatever shape it finds into printable lines
+   instead of assuming one structure. */
+function flattenPatchSection(value) {
+  if (!value) return [];
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) {
+    return value.flatMap((v) => {
+      if (typeof v === "string") return [v];
+      if (v && typeof v === "object") return [v.note || v.info || ""].filter(Boolean);
+      return [];
+    });
+  }
+  if (typeof value === "object") return Object.values(value).flatMap(flattenPatchSection);
+  return [];
+}
+
+/* Valve ships an official Russian localization. The raw file is several MB of KeyValues,
+   so we parse it once, keep only ability/item name+description keys, and cache that subset.
+   Loaded lazily (only when the reference tab asks for it) and always optional: if anything
+   fails, the UI falls back to the English names from dotaconstants. */
+let ruLocalePromise = null;
+
+const RU_SOURCES = [
+  "https://raw.githubusercontent.com/dotabuff/d2vpkr/master/dota/resource/localization/dota_russian.txt",
+  "https://raw.githubusercontent.com/dotabuff/d2vpk/master/dota/resource/dota_russian.txt",
+];
+
+function parseValveKV(text) {
+  const map = {};
+  const re = /^\s*"([^"]+)"\s+"([\s\S]*?)"\s*$/gm;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    map[m[1]] = m[2];
+  }
+  return map;
+}
+
+function stripValveMarkup(s) {
+  return s
+    .replace(/<[^>]+>/g, "")
+    .replace(/%%/g, "%")
+    .replace(/\\n/g, "\n")
+    .replace(/\t/g, " ")
+    .trim();
+}
+
+async function getRuLocale() {
+  if (ruLocalePromise) return ruLocalePromise;
+  const cached = readLocalCache("dw_ru_locale");
+  if (cached) {
+    ruLocalePromise = Promise.resolve(cached);
+    return cached;
+  }
+  ruLocalePromise = (async () => {
+    let text = null;
+    for (const url of RU_SOURCES) {
+      try {
+        const r = await fetch(url);
+        if (r.ok) {
+          text = await r.text();
+          break;
+        }
+      } catch {
+        // try the next mirror
+      }
+    }
+    if (!text) throw new Error("no locale source");
+
+    const kv = parseValveKV(text);
+    const out = {};
+    for (const [key, value] of Object.entries(kv)) {
+      // ability + item names and descriptions only — everything else is UI chrome we don't need
+      const mName = key.match(/^DOTA_Tooltip_[Aa]bility_([a-z0-9_]+)$/);
+      const mDesc = key.match(/^DOTA_Tooltip_[Aa]bility_([a-z0-9_]+)_Description$/);
+      const mLore = key.match(/^DOTA_Tooltip_[Aa]bility_([a-z0-9_]+)_Lore$/);
+      if (mDesc) out[`d:${mDesc[1]}`] = stripValveMarkup(value);
+      else if (mLore) out[`l:${mLore[1]}`] = stripValveMarkup(value);
+      else if (mName) out[`n:${mName[1]}`] = stripValveMarkup(value);
+    }
+    try {
+      writeLocalCache("dw_ru_locale", out);
+    } catch {
+      // subset can still be large; if quota is hit we just refetch next session
+    }
+    return out;
+  })();
+  return ruLocalePromise;
+}
+
+// dotaconstants keys items as "blink"; Valve keys them as "item_blink"
+function ruName(locale, key, isItem) {
+  if (!locale) return null;
+  return locale[`n:${isItem ? `item_${key}` : key}`] || locale[`n:${key}`] || null;
+}
+function ruDesc(locale, key, isItem) {
+  if (!locale) return null;
+  return locale[`d:${isItem ? `item_${key}` : key}`] || locale[`d:${key}`] || null;
+}
+
 let abilitiesCatalogPromise = null;
 
 async function getAbilitiesCatalog() {
@@ -951,6 +1074,7 @@ function HomeTab({ heroes, setTab }) {
 const MONTH_RU = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
 
 function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
+  const [premium] = usePremium();
   const [input, setInput] = useState("");
   const [accountId, setAccountId] = useState(null);
   const [parseError, setParseError] = useState(null);
@@ -1112,6 +1236,15 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
           </div>
 
           <PeersPanel peers={data.peers} />
+
+          {premium ? (
+            <PremiumProfilePanels matches={data.matches} />
+          ) : (
+            <PremiumLock
+              title="Разбор по позициям и форма"
+              text="Винрейт и KDA по каждой позиции, графики золота и опыта за минуту по последним матчам. Входит в Premium — включить демо можно на вкладке «Тарифы»."
+            />
+          )}
         </>
       )}
     </div>
@@ -1577,6 +1710,37 @@ function DraftTab({ heroes, onOpenCard }) {
   const [pickerQuery, setPickerQuery] = useState("");
   const [poolOnly, setPoolOnly] = useState(false);
   const [, forceRerender] = useState(0);
+  const [premium] = usePremium();
+  const [savedDrafts, setSavedDrafts] = useState(() => {
+    try {
+      return JSON.parse(localStorage.getItem("dw_saved_drafts") || "[]");
+    } catch {
+      return [];
+    }
+  });
+
+  function persistDrafts(next) {
+    setSavedDrafts(next);
+    try {
+      localStorage.setItem("dw_saved_drafts", JSON.stringify(next));
+    } catch {
+      notify("Не удалось сохранить драфт — хранилище браузера переполнено.");
+    }
+  }
+
+  function saveCurrentDraft() {
+    if (radiant.every((x) => !x) && dire.every((x) => !x)) {
+      notify("Сначала выбери хотя бы одного героя.");
+      return;
+    }
+    const entry = { id: Date.now(), radiant: [...radiant], dire: [...dire] };
+    persistDrafts([entry, ...savedDrafts].slice(0, 20));
+  }
+
+  function loadDraft(entry) {
+    setRadiant(entry.radiant);
+    setDire(entry.dire);
+  }
 
   const heroById = (id) => heroes.find((h) => h.id === id);
   const pickedIds = useMemo(() => [...radiant, ...dire].filter(Boolean), [radiant, dire]);
@@ -1791,6 +1955,49 @@ function DraftTab({ heroes, onOpenCard }) {
         <GamePlanPanel title="План игры — Radiant" color="#5FCB8E" plan={gamePlanFor(radiant, dire)} heroById={heroById} onOpenCard={onOpenCard} />
         <GamePlanPanel title="План игры — Dire" color="#E2574C" plan={gamePlanFor(dire, radiant)} heroById={heroById} onOpenCard={onOpenCard} />
       </div>
+
+      {premium ? (
+        <div style={{ ...styles.panel, border: "1px solid #4A3D1E" }}>
+          <div style={styles.panelHeader}>
+            <Gem size={16} color="#E5B33D" />
+            <span style={{ ...styles.panelTitle, color: "#E5B33D" }}>История драфтов</span>
+            <button style={{ ...styles.tourGo, marginLeft: "auto" }} onClick={saveCurrentDraft}>
+              Сохранить текущий
+            </button>
+          </div>
+          {savedDrafts.length === 0 && <div style={styles.emptyState}>Пока ничего не сохранено.</div>}
+          {savedDrafts.map((entry) => (
+            <div key={entry.id} style={styles.savedDraftRow}>
+              <div style={styles.savedDraftIcons}>
+                {entry.radiant.filter(Boolean).map((id) => {
+                  const h = heroById(id);
+                  return h ? <HeroIcon key={`r${id}`} hero={h} style={styles.savedDraftIcon} /> : null;
+                })}
+                <span style={styles.savedVs}>vs</span>
+                {entry.dire.filter(Boolean).map((id) => {
+                  const h = heroById(id);
+                  return h ? <HeroIcon key={`d${id}`} hero={h} style={styles.savedDraftIcon} /> : null;
+                })}
+              </div>
+              <span style={{ ...styles.mutedText, fontSize: 11 }}>
+                {new Date(entry.id).toLocaleDateString("ru-RU")}
+              </span>
+              <button style={styles.tourGo} onClick={() => loadDraft(entry)}>Открыть</button>
+              <button
+                style={styles.slotClear}
+                onClick={() => persistDrafts(savedDrafts.filter((d) => d.id !== entry.id))}
+              >
+                <X size={13} />
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <PremiumLock
+          title="История драфтов"
+          text="Сохраняй разобранные драфты и возвращайся к ним позже. Входит в Premium — включить демо можно на вкладке «Тарифы»."
+        />
+      )}
 
       <div style={styles.methodNote}>
         <Info size={13} color="#9C8FB0" style={{ flexShrink: 0, marginTop: 2 }} />
@@ -2695,6 +2902,135 @@ function CounterWebTab({ heroes, onPick }) {
 
 /* ---------- styles ---------- */
 
+/* ---------- premium ---------- */
+
+/* No payment provider is wired up yet, so this is a local demo flag: it lets the premium
+   sections be built and reviewed without pretending a purchase happened. */
+function usePremium() {
+  const [premium, setPremium] = useState(() => {
+    try {
+      return localStorage.getItem("dw_premium_demo") === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggle = (on) => {
+    setPremium(on);
+    try {
+      if (on) localStorage.setItem("dw_premium_demo", "1");
+      else localStorage.removeItem("dw_premium_demo");
+    } catch {
+      // storage unavailable — flag just won't persist
+    }
+  };
+  return [premium, toggle];
+}
+
+function PremiumLock({ title, text }) {
+  return (
+    <div style={styles.premiumLockCard}>
+      <div style={styles.premiumLockHead}>
+        <Lock size={14} color="#E5B33D" />
+        <span style={{ ...styles.panelTitle, color: "#E5B33D" }}>{title}</span>
+        <span style={styles.premiumTag}>PREMIUM</span>
+      </div>
+      <div style={{ ...styles.mutedText, fontSize: 12 }}>{text}</div>
+    </div>
+  );
+}
+
+const LANE_ROLE_LABELS = { 1: "Сейф-лейн", 2: "Мид", 3: "Оффлейн", 4: "Джунгли" };
+
+function PremiumProfilePanels({ matches }) {
+  const byLane = useMemo(() => {
+    if (!Array.isArray(matches)) return [];
+    const acc = {};
+    matches.forEach((m) => {
+      if (!m.lane_role || m.player_slot == null || m.radiant_win == null) return;
+      const won = (m.player_slot < 128) === m.radiant_win;
+      const key = m.lane_role;
+      if (!acc[key]) acc[key] = { games: 0, wins: 0, kills: 0, deaths: 0, assists: 0 };
+      acc[key].games += 1;
+      if (won) acc[key].wins += 1;
+      acc[key].kills += m.kills || 0;
+      acc[key].deaths += m.deaths || 0;
+      acc[key].assists += m.assists || 0;
+    });
+    return Object.entries(acc)
+      .filter(([, v]) => v.games >= 3)
+      .map(([lane, v]) => ({
+        lane: LANE_ROLE_LABELS[lane] || `Роль ${lane}`,
+        games: v.games,
+        winRate: Math.round((v.wins / v.games) * 1000) / 10,
+        kda: v.deaths > 0 ? ((v.kills + v.assists) / v.deaths).toFixed(2) : "—",
+      }))
+      .sort((a, b) => b.games - a.games);
+  }, [matches]);
+
+  const form = useMemo(() => {
+    if (!Array.isArray(matches)) return [];
+    const recent = [...matches]
+      .filter((m) => m.start_time)
+      .sort((a, b) => a.start_time - b.start_time)
+      .slice(-40);
+    return recent.map((m, i) => ({
+      idx: i + 1,
+      gpm: m.gold_per_min || 0,
+      xpm: m.xp_per_min || 0,
+    }));
+  }, [matches]);
+
+  return (
+    <>
+      <div style={{ ...styles.panel, border: "1px solid #4A3D1E" }}>
+        <div style={styles.panelHeader}>
+          <Gem size={16} color="#E5B33D" />
+          <span style={{ ...styles.panelTitle, color: "#E5B33D" }}>Разбор по позициям</span>
+        </div>
+        {byLane.length === 0 && <div style={styles.emptyState}>Недостаточно матчей с определённой позицией.</div>}
+        {byLane.map((l) => (
+          <div key={l.lane} style={styles.roleRow}>
+            <span style={styles.matchupName}>{l.lane}</span>
+            <span style={styles.mutedText}>{l.games} игр</span>
+            <span style={{ ...styles.mutedText, minWidth: 74, textAlign: "right" }}>KDA {l.kda}</span>
+            <span style={{ ...styles.rolePct, color: l.winRate >= 50 ? "#5FCB8E" : "#E2574C" }}>
+              {l.winRate}%
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {form.length > 3 && (
+        <div style={{ ...styles.panel, border: "1px solid #4A3D1E" }}>
+          <div style={styles.panelHeader}>
+            <Gem size={16} color="#E5B33D" />
+            <span style={{ ...styles.panelTitle, color: "#E5B33D" }}>Форма: золото и опыт в минуту</span>
+          </div>
+          <div style={{ width: "100%", height: 200 }}>
+            <ResponsiveContainer>
+              <LineChart data={form} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#2A1A40" vertical={false} />
+                <XAxis dataKey="idx" tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={{ stroke: "#2A1A40" }} tickLine={false} />
+                <YAxis tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={false} tickLine={false} />
+                <Tooltip
+                  contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 8, fontSize: 12 }}
+                  labelStyle={{ color: "#F2EAFB" }}
+                  labelFormatter={(v) => `Матч ${v}`}
+                />
+                <Line type="monotone" dataKey="gpm" name="GPM" stroke="#E5B33D" strokeWidth={2} dot={false} />
+                <Line type="monotone" dataKey="xpm" name="XPM" stroke="#B24BF3" strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+          <div style={{ ...styles.mutedText, fontSize: 11, marginTop: 6 }}>
+            Жёлтая линия — золото в минуту, фиолетовая — опыт. По последним {form.length} матчам.
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 /* ---------- tab: reference (abilities + items, from dotaconstants) ---------- */
 
 function ReferenceTab({ heroes }) {
@@ -2702,6 +3038,30 @@ function ReferenceTab({ heroes }) {
   const [heroId, setHeroId] = useState(null);
   const [query, setQuery] = useState("");
   const [state, setState] = useState({ loading: true, abilities: null, items: null, error: null });
+  const [lang, setLang] = useState("ru");
+  const [locale, setLocale] = useState({ loading: false, data: null, failed: false });
+
+  useEffect(() => {
+    if (heroes.length && heroId == null) setHeroId(heroes[0].id);
+  }, [heroes, heroId]);
+
+  // Russian pack is a large one-time download, so only fetch it when RU is actually selected
+  useEffect(() => {
+    if (lang !== "ru" || locale.data || locale.loading || locale.failed) return;
+    let cancelled = false;
+    setLocale((s) => ({ ...s, loading: true }));
+    getRuLocale()
+      .then((data) => {
+        if (!cancelled) setLocale({ loading: false, data, failed: false });
+      })
+      .catch(() => {
+        if (!cancelled) setLocale({ loading: false, data: null, failed: true });
+        notify("Русская локализация не загрузилась — показываю оригинальные названия.");
+      });
+    return () => { cancelled = true; };
+  }, [lang, locale.data, locale.loading, locale.failed]);
+
+  const ru = lang === "ru" ? locale.data : null;
 
   useEffect(() => {
     if (heroes.length && heroId == null) setHeroId(heroes[0].id);
@@ -2738,10 +3098,14 @@ function ReferenceTab({ heroes }) {
     return Object.entries(state.items.items)
       .map(([key, data]) => ({ key, data }))
       .filter((i) => i.data && i.data.dname && i.data.cost)
-      .filter((i) => (q ? i.data.dname.toLowerCase().includes(q) : true))
+      .filter((i) => {
+        if (!q) return true;
+        const rn = ruName(ru, i.key, true);
+        return i.data.dname.toLowerCase().includes(q) || (rn ? rn.toLowerCase().includes(q) : false);
+      })
       .sort((a, b) => (b.data.cost || 0) - (a.data.cost || 0))
       .slice(0, 60);
-  }, [state.items, query]);
+  }, [state.items, query, ru]);
 
   return (
     <div style={styles.body}>
@@ -2758,7 +3122,29 @@ function ReferenceTab({ heroes }) {
         >
           Предметы
         </button>
+        <span style={styles.langDivider} />
+        <button
+          style={{ ...styles.segmentBtn, ...(lang === "ru" ? styles.segmentBtnActive : {}) }}
+          onClick={() => setLang("ru")}
+        >
+          RU
+        </button>
+        <button
+          style={{ ...styles.segmentBtn, ...(lang === "en" ? styles.segmentBtnActive : {}) }}
+          onClick={() => setLang("en")}
+        >
+          EN
+        </button>
       </div>
+
+      {lang === "ru" && locale.loading && (
+        <div style={{ ...styles.mutedText, fontSize: 12 }}>Загружаю русскую локализацию Valve (один раз, файл большой)…</div>
+      )}
+      {lang === "ru" && locale.failed && (
+        <div style={{ ...styles.mutedText, fontSize: 12 }}>
+          Русская локализация недоступна — показываю оригинальные названия.
+        </div>
+      )}
 
       {state.loading && <SkeletonBlock height={260} />}
       {state.error && <div style={styles.emptyState}>{state.error}</div>}
@@ -2787,8 +3173,11 @@ function ReferenceTab({ heroes }) {
                   />
                 )}
                 <div style={{ minWidth: 0 }}>
-                  <div style={styles.abilityName}>{data.dname}</div>
-                  {data.desc && <div style={styles.abilityDesc}>{data.desc}</div>}
+                  <div style={styles.abilityName}>{ruName(ru, key, false) || data.dname}</div>
+                  {ruName(ru, key, false) && <div style={styles.origName}>{data.dname}</div>}
+                  {(ruDesc(ru, key, false) || data.desc) && (
+                    <div style={styles.abilityDesc}>{ruDesc(ru, key, false) || data.desc}</div>
+                  )}
                   {data.dmg_type && <div style={styles.abilityMeta}>Тип урона: {data.dmg_type}</div>}
                 </div>
               </div>
@@ -2827,9 +3216,13 @@ function ReferenceTab({ heroes }) {
                 )}
                 <div style={{ minWidth: 0 }}>
                   <div style={styles.abilityName}>
-                    {data.dname} <span style={styles.itemCost}>{data.cost} золота</span>
+                    {ruName(ru, key, true) || data.dname}
+                    <span style={styles.itemCost}>{data.cost} золота</span>
                   </div>
-                  {data.notes && <div style={styles.abilityDesc}>{data.notes}</div>}
+                  {ruName(ru, key, true) && <div style={styles.origName}>{data.dname}</div>}
+                  {(ruDesc(ru, key, true) || data.desc || data.notes) && (
+                    <div style={styles.abilityDesc}>{ruDesc(ru, key, true) || data.desc || data.notes}</div>
+                  )}
                 </div>
               </div>
             ))}
@@ -2840,9 +3233,9 @@ function ReferenceTab({ heroes }) {
       <div style={styles.methodNote}>
         <Info size={13} color="#9C8FB0" style={{ flexShrink: 0, marginTop: 2 }} />
         <span>
-          Описания способностей и предметов — из открытой базы dotaconstants (данные самой игры).
-          Это справочник фактов, а не аналитика: тут нет оценок «сильно/слабо», только то, что предмет
-          или способность реально делает.
+          Русские названия и описания — официальная локализация Valve из файлов игры, английские —
+          из базы dotaconstants. Под русским названием показано оригинальное. Переводов от себя я не
+          добавляю: если у чего-то нет официального русского текста, останется английский.
         </span>
       </div>
     </div>
@@ -2891,31 +3284,99 @@ function PatchesTab() {
         </div>
         {state.loading && <SkeletonRows count={6} />}
         {state.error && <div style={styles.emptyState}>{state.error}</div>}
-        {!state.loading && !state.error && list.map((p, i) => {
-          const d = p.date ? new Date(p.date) : null;
-          return (
-            <div key={p.name} style={styles.patchRow}>
-              <span style={{ ...styles.patchDot, background: i === 0 ? "#B24BF3" : "#3A2857" }} />
-              <span style={styles.patchName}>{p.name}</span>
-              {i === 0 && <span style={styles.patchCurrent}>текущий</span>}
-              <span style={styles.patchDate}>
-                {d ? d.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" }) : "—"}
-              </span>
-            </div>
-          );
-        })}
+        {!state.loading && !state.error && list.map((p, i) => (
+          <PatchRow key={p.name} patch={p} isLatest={i === 0} />
+        ))}
       </div>
 
       <div style={styles.methodNote}>
         <Info size={13} color="#9C8FB0" style={{ flexShrink: 0, marginTop: 2 }} />
         <span>
-          Здесь только номера патчей и даты выхода — это всё, что отдаёт открытый API. Полных текстов
-          патчноутов в нём нет, придумывать их я не буду. Сами changelog'и Valve публикует на
-          официальном сайте Dota 2.
+          Тексты изменений — официальные патчноуты Valve, разобранные проектом dotaconstants.
+          Для части старых патчей разбора может не быть — тогда покажется только дата.
+          Ничего от себя я сюда не дописываю.
         </span>
       </div>
     </div>
   );
+}
+
+function PatchRow({ patch, isLatest }) {
+  const [open, setOpen] = useState(false);
+  const [notes, setNotes] = useState({ loading: false, data: null, error: false });
+  const d = patch.date ? new Date(patch.date) : null;
+
+  function toggle() {
+    const next = !open;
+    setOpen(next);
+    if (next && !notes.data && !notes.loading) {
+      setNotes({ loading: true, data: null, error: false });
+      getPatchNotes()
+        .then((all) => setNotes({ loading: false, data: all[patch.name] || null, error: false }))
+        .catch(() => setNotes({ loading: false, data: null, error: true }));
+    }
+  }
+
+  const sections = useMemo(() => {
+    if (!notes.data) return [];
+    if (Array.isArray(notes.data)) {
+      const lines = flattenPatchSection(notes.data);
+      return lines.length ? [{ title: "Изменения", lines }] : [];
+    }
+    return Object.entries(notes.data)
+      .map(([key, value]) => ({ title: prettifyPatchKey(key), lines: flattenPatchSection(value) }))
+      .filter((s) => s.lines.length > 0);
+  }, [notes.data]);
+
+  return (
+    <div style={styles.patchBlock}>
+      <button style={styles.patchRowBtn} onClick={toggle}>
+        <span style={{ ...styles.patchDot, background: isLatest ? "#B24BF3" : "#3A2857" }} />
+        <span style={styles.patchName}>{patch.name}</span>
+        {isLatest && <span style={styles.patchCurrent}>текущий</span>}
+        <span style={styles.patchDate}>
+          {d ? d.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" }) : "—"}
+        </span>
+        <ChevronDown
+          size={15}
+          color="#9C8FB0"
+          style={{ transform: open ? "rotate(180deg)" : "none", transition: "transform 0.18s ease", flexShrink: 0 }}
+        />
+      </button>
+
+      {open && (
+        <div style={styles.patchBody}>
+          {notes.loading && <SkeletonRows count={3} />}
+          {notes.error && <div style={styles.emptyState}>Не удалось загрузить изменения этого патча.</div>}
+          {!notes.loading && !notes.error && sections.length === 0 && (
+            <div style={styles.emptyState}>Для этого патча разобранных изменений нет.</div>
+          )}
+          {sections.map((s) => (
+            <div key={s.title} style={styles.patchSection}>
+              <div style={styles.patchSectionTitle}>{s.title}</div>
+              {s.lines.slice(0, 40).map((line, idx) => (
+                <div key={idx} style={styles.patchLine}>
+                  <span style={styles.patchBullet} />
+                  <span>{line}</span>
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function prettifyPatchKey(key) {
+  if (key === "general" || key === "generic") return "Общие изменения";
+  if (key === "items") return "Предметы";
+  if (key === "heroes") return "Герои";
+  return key
+    .replace(/^npc_dota_hero_/, "")
+    .replace(/^item_/, "")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 /* ---------- tab: pricing ---------- */
@@ -2940,6 +3401,7 @@ const PRO_FEATURES = [
 ];
 
 function PricingTab() {
+  const [premium, setPremium] = usePremium();
   return (
     <div style={styles.body}>
       <div style={styles.pricingHead}>
@@ -2979,8 +3441,11 @@ function PricingTab() {
               <span>{f}</span>
             </div>
           ))}
-          <button style={{ ...styles.premiumBtn, marginLeft: 0, marginTop: 14 }} disabled>
-            <Lock size={11} /> Подписка пока недоступна
+          <button
+            style={{ ...styles.premiumBtn, marginLeft: 0, marginTop: 14 }}
+            onClick={() => setPremium(!premium)}
+          >
+            {premium ? <><Check size={11} /> Демо включено — выключить</> : <><Gem size={11} /> Включить демо-режим</>}
           </button>
         </div>
       </div>
@@ -2988,8 +3453,9 @@ function PricingTab() {
       <div style={styles.methodNote}>
         <Info size={13} color="#9C8FB0" style={{ flexShrink: 0, marginTop: 2 }} />
         <span>
-          Платёжная система ещё не подключена — это описание планируемых тарифов, а не работающая
-          покупка. Ничего оплатить сейчас нельзя.
+          Платёжная система ещё не подключена — оплатить ничего нельзя, это описание планируемых
+          тарифов. Кнопка выше включает демо-режим: премиум-разделы станут видны локально в этом
+          браузере, чтобы можно было посмотреть и доработать их содержимое.
         </span>
       </div>
     </div>
@@ -3240,6 +3706,36 @@ const styles = {
   itemCost: { fontSize: 11, color: "#E5B33D", fontWeight: 600, marginLeft: 6 },
 
   /* patches */
+  patchBlock: { borderBottom: "1px solid #241636" },
+  patchRowBtn: {
+    display: "flex", alignItems: "center", gap: 10, padding: "11px 0", width: "100%",
+    background: "transparent", border: "none", color: "#F2EAFB", cursor: "pointer", textAlign: "left",
+  },
+  patchBody: { padding: "2px 0 14px 18px" },
+  patchSection: { marginBottom: 12 },
+  patchSectionTitle: {
+    fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 13, color: "#C084FC",
+    marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.03em",
+  },
+  patchLine: { display: "flex", gap: 8, fontSize: 12, color: "#C9BEDD", lineHeight: 1.5, padding: "2px 0" },
+  patchBullet: {
+    width: 4, height: 4, borderRadius: "50%", background: "#6E5F86", flexShrink: 0, marginTop: 7,
+  },
+  langDivider: { width: 1, background: "#2F1F49", margin: "2px 4px" },
+  origName: { fontSize: 11, color: "#6E5F86", marginBottom: 4 },
+
+  /* premium */
+  premiumLockCard: {
+    background: "linear-gradient(160deg, #1A1508, #120D06)", border: "1px dashed #4A3D1E",
+    borderRadius: 14, padding: 18,
+  },
+  premiumLockHead: { display: "flex", alignItems: "center", gap: 8, marginBottom: 8 },
+  savedDraftRow: { display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid #241636" },
+  savedDraftIcons: { display: "flex", alignItems: "center", gap: 3, flex: 1, flexWrap: "wrap", minWidth: 0 },
+  savedDraftIcon: { width: 20, height: 20, borderRadius: 4 },
+  savedVs: { fontSize: 10, color: "#6E5F86", margin: "0 4px" },
+
+  /* patches (legacy row, kept for spacing) */
   patchRow: { display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: "1px solid #241636" },
   patchDot: { width: 8, height: 8, borderRadius: "50%", flexShrink: 0 },
   patchName: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 14 },
