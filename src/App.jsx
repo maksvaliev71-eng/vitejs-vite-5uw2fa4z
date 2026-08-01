@@ -825,17 +825,13 @@ export default function App() {
       `}</style>
 
       <header style={styles.header}>
-        {tab !== "home" && (
-          <div style={styles.brandRow}>
-            <div>
-              <div style={styles.brandWordmark}>DRAFTHEX</div>
-              <div style={styles.brandSub}>Драфт и контрпики Dota 2</div>
-            </div>
+        <div style={styles.brandRow}>
+          <div style={{ visibility: tab === "home" ? "hidden" : "visible" }}>
+            <div style={styles.brandWordmark}>DRAFTHEX</div>
+            <div style={styles.brandSub}>Драфт и контрпики Dota 2</div>
           </div>
-        )}
-        <div style={{ marginLeft: tab === "home" ? "auto" : 0 }}>
-          <PageMenu tab={tab} setTab={setTab} />
         </div>
+        <PageMenu tab={tab} setTab={setTab} />
       </header>
 
       {loading && (
@@ -2666,6 +2662,50 @@ function CounterWebTab({ heroes, onPick }) {
     };
   }, [size, autoFit, buildProgress]);
 
+  // Track every active pointer so two-finger pinch works on touch, not just drag.
+  const pointersRef = useRef(new Map());
+  const pinchRef = useRef(null);
+
+  function pointerDistance() {
+    const pts = [...pointersRef.current.values()];
+    if (pts.length < 2) return 0;
+    return Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+  }
+
+  function onPointerDown(e) {
+    pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointersRef.current.size === 2) {
+      // second finger down — switch from panning to pinching
+      dragState.current = null;
+      pinchRef.current = { startDist: pointerDistance(), startZoom: zoom };
+      setAutoFit(false);
+    } else if (pointersRef.current.size === 1) {
+      onDragStart(e.clientX, e.clientY);
+    }
+  }
+
+  function onPointerMove(e) {
+    if (pointersRef.current.has(e.pointerId)) {
+      pointersRef.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    }
+    if (pinchRef.current && pointersRef.current.size >= 2) {
+      const dist = pointerDistance();
+      if (dist > 0 && pinchRef.current.startDist > 0) {
+        const next = pinchRef.current.startZoom * (dist / pinchRef.current.startDist);
+        setZoom(Math.max(0.2, Math.min(2.5, next)));
+        didDragRef.current = true;
+      }
+      return;
+    }
+    onDragMove(e.clientX, e.clientY);
+  }
+
+  function onPointerUp(e) {
+    pointersRef.current.delete(e.pointerId);
+    if (pointersRef.current.size < 2) pinchRef.current = null;
+    if (pointersRef.current.size === 0) onDragEnd();
+  }
+
   function onDragStart(clientX, clientY) {
     dragState.current = { startX: clientX, startY: clientY, panX: pan.x, panY: pan.y };
     didDragRef.current = false;
@@ -2773,10 +2813,11 @@ function CounterWebTab({ heroes, onPick }) {
             <div
               style={{ ...styles.svgScroll, cursor: dragState.current ? "grabbing" : "grab", touchAction: "none" }}
               ref={containerRef}
-              onPointerDown={(e) => onDragStart(e.clientX, e.clientY)}
-              onPointerMove={(e) => onDragMove(e.clientX, e.clientY)}
-              onPointerUp={onDragEnd}
-              onPointerLeave={onDragEnd}
+              onPointerDown={onPointerDown}
+              onPointerMove={onPointerMove}
+              onPointerUp={onPointerUp}
+              onPointerCancel={onPointerUp}
+              onPointerLeave={onPointerUp}
               onWheel={(e) => { e.preventDefault(); setAutoFit(false); setZoom((z) => Math.max(0.2, Math.min(2.5, z - e.deltaY * 0.001))); }}
             >
               <div style={{ position: "absolute", width: size, height: size, transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin: "0 0" }}>
@@ -3769,8 +3810,16 @@ const styles = {
     fontFamily: "'Inter', sans-serif",
     padding: "20px",
   },
-  header: { display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 16, marginBottom: 20 },
-  brandRow: { display: "flex", alignItems: "center", gap: 12 },
+  header: {
+    position: "sticky", top: 0, zIndex: 60,
+    display: "flex", justifyContent: "space-between", alignItems: "center",
+    flexWrap: "nowrap", gap: 16, height: 64, marginBottom: 20,
+    background: "rgba(7,5,13,0.82)", backdropFilter: "blur(10px)",
+    WebkitBackdropFilter: "blur(10px)",
+    borderBottom: "1px solid #1D1230",
+    marginLeft: -20, marginRight: -20, paddingLeft: 20, paddingRight: 20,
+  },
+  brandRow: { display: "flex", alignItems: "center", gap: 12, minWidth: 0 },
   brandWordmark: {
     fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 24, letterSpacing: "0.08em",
     background: "linear-gradient(135deg, #E9D5FF, #B24BF3 55%, #6D28D9)",
