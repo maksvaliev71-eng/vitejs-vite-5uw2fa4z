@@ -141,6 +141,30 @@ function writeLocalCache(key, data) {
 
 const matchupsCache = new Map();
 
+/* OpenDota's free tier rate-limits bulk requests. Without pacing, a burst gets 429s
+   and heroes silently end up with no matchup data (= no edges in the graph).
+   This paces requests inside a rolling window and retries once on 429. */
+const RATE_WINDOW_MS = 60_000;
+const RATE_MAX = 45;
+const rateTimestamps = [];
+
+async function rateLimitedFetch(url, attempt = 0) {
+  const now = Date.now();
+  while (rateTimestamps.length && now - rateTimestamps[0] > RATE_WINDOW_MS) rateTimestamps.shift();
+  if (rateTimestamps.length >= RATE_MAX) {
+    const waitMs = RATE_WINDOW_MS - (now - rateTimestamps[0]) + 50;
+    await new Promise((res) => setTimeout(res, waitMs));
+    return rateLimitedFetch(url, attempt);
+  }
+  rateTimestamps.push(Date.now());
+  const r = await fetch(url);
+  if (r.status === 429 && attempt < 2) {
+    await new Promise((res) => setTimeout(res, 1500 * (attempt + 1)));
+    return rateLimitedFetch(url, attempt + 1);
+  }
+  return r;
+}
+
 async function getMatchups(heroId) {
   if (matchupsCache.has(heroId)) return matchupsCache.get(heroId);
   const cacheKey = `dw_matchups_${heroId}`;
@@ -149,7 +173,7 @@ async function getMatchups(heroId) {
     matchupsCache.set(heroId, cached);
     return cached;
   }
-  const r = await fetch(`https://api.opendota.com/api/heroes/${heroId}/matchups`);
+  const r = await rateLimitedFetch(`https://api.opendota.com/api/heroes/${heroId}/matchups`);
   if (!r.ok) throw new Error("network");
   const data = await r.json();
   matchupsCache.set(heroId, data);
@@ -2259,7 +2283,7 @@ const SCOPE_OPTIONS = [
   { key: "top48", label: "Топ-48 меты", count: 48 },
   { key: "all", label: "Все герои", count: Infinity },
 ];
-const MIN_GAMES_EDGE = 20;
+const MIN_GAMES_EDGE = 10;
 const EDGE_WINRATE_THRESHOLD = 0.55;
 
 function NodeRing({ x, y, isActive, color, dimmed, onClick }) {
@@ -2310,6 +2334,7 @@ function CounterWebTab({ heroes, onPick }) {
   const [activeId, setActiveId] = useState(null);
   const [zoom, setZoom] = useState(1);
   const [autoFit, setAutoFit] = useState(true);
+  const [missingCount, setMissingCount] = useState(0);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [searchQuery, setSearchQuery] = useState("");
   const containerRef = useRef(null);
@@ -2325,11 +2350,12 @@ function CounterWebTab({ heroes, onPick }) {
     setActiveId(null);
 
     const toFetch = selection.filter((h) => !matchupsCache.has(h.id) && !readLocalCache(`dw_matchups_${h.id}`));
+    let failed = 0;
     if (toFetch.length) {
       const doneBase = selection.length - toFetch.length;
       setBuildProgress({ done: doneBase, total: selection.length });
       let completed = 0;
-      const CONCURRENCY = 6;
+      const CONCURRENCY = 4;
       let cursor = 0;
       async function worker() {
         while (cursor < toFetch.length) {
@@ -2337,7 +2363,7 @@ function CounterWebTab({ heroes, onPick }) {
           try {
             await getMatchups(h.id);
           } catch {
-            // skip hero on failure, graph just won't show its edges
+            failed += 1; // counted and surfaced below, not silently dropped
           }
           completed += 1;
           setBuildProgress({ done: doneBase + completed, total: selection.length });
@@ -2357,16 +2383,24 @@ function CounterWebTab({ heroes, onPick }) {
 
     const map = {};
     const validIds = new Set(selection.map((h) => h.id));
+    let noData = 0;
     selection.forEach((h) => {
       const data = matchupsCache.get(h.id);
-      if (!data) return;
+      if (!data) {
+        noData += 1;
+        return;
+      }
       map[h.id] = data
         .filter((m) => m.games_played >= MIN_GAMES_EDGE && validIds.has(m.hero_id))
         .map((m) => ({ targetId: m.hero_id, winRate: m.wins / m.games_played, games: m.games_played }));
     });
     setEdgesByHero(map);
+    setMissingCount(noData);
     setBuildProgress(null);
     setBuilt(nextScope);
+    if (failed > 0) {
+      notify(`${failed} героев не загрузились (лимит запросов OpenDota) — нажми «сбросить» в графе, чтобы дозагрузить.`);
+    }
   }
 
   useEffect(() => {
@@ -2397,24 +2431,33 @@ function CounterWebTab({ heroes, onPick }) {
     });
   }, [graphHeroes, size]);
 
-  // auto-fit the graph to the available viewport so it doesn't require scrolling —
-  // recalculates whenever the graph size changes (new scope) or the window resizes
+  // Auto-fit the graph to the container. A ResizeObserver is required here: the graph panel
+  // is unmounted while the build progress bar shows, so a one-shot measurement would run
+  // against a null/zero-size container and leave the graph pinned to the top-left corner.
   useEffect(() => {
     if (!autoFit) return;
+    const el = containerRef.current;
+    if (!el) return;
+
     function fit() {
-      if (!containerRef.current) return;
-      const availW = containerRef.current.clientWidth - 16;
-      const availH = containerRef.current.clientHeight - 16;
+      const availW = el.clientWidth;
+      const availH = el.clientHeight;
       if (availW > 0 && availH > 0) {
         const z = Math.max(0.3, Math.min(1.8, Math.min(availW / size, availH / size)));
         setZoom(z);
         setPan({ x: (availW - size * z) / 2, y: (availH - size * z) / 2 });
       }
     }
+
     fit();
+    const ro = new ResizeObserver(fit);
+    ro.observe(el);
     window.addEventListener("resize", fit);
-    return () => window.removeEventListener("resize", fit);
-  }, [size, autoFit]);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", fit);
+    };
+  }, [size, autoFit, buildProgress]);
 
   function onDragStart(clientX, clientY) {
     dragState.current = { startX: clientX, startY: clientY, panX: pan.x, panY: pan.y };
@@ -2513,7 +2556,11 @@ function CounterWebTab({ heroes, onPick }) {
               <div style={styles.zoomControls}>
                 <button style={styles.zoomBtn} onClick={() => { setAutoFit(false); setZoom((z) => Math.min(2.5, z + 0.2)); }}><ZoomIn size={14} /></button>
                 <button style={styles.zoomBtn} onClick={() => { setAutoFit(false); setZoom((z) => Math.max(0.2, z - 0.2)); }}><ZoomOut size={14} /></button>
-                <button style={styles.zoomBtn} onClick={() => setAutoFit(true)}><RotateCcw size={14} /></button>
+                <button
+                  style={styles.zoomBtn}
+                  title="Сбросить вид и дозагрузить недостающих героев"
+                  onClick={() => { setAutoFit(true); if (missingCount > 0) buildGraph(scope); }}
+                ><RotateCcw size={14} /></button>
               </div>
             </div>
             <div
@@ -2590,7 +2637,17 @@ function CounterWebTab({ heroes, onPick }) {
             {!activeHero && (
               <div style={styles.hintBox}>
                 <Info size={16} color="#9C8FB0" />
-                <span>Нажми на героя в паутине — откроется в карточке и таблице тоже.</span>
+                <span>
+                  Нажми на героя в паутине — откроется в карточке и таблице тоже.
+                  {missingCount > 0 && ` У ${missingCount} героев данные не догрузились — нажми «сбросить».`}
+                </span>
+              </div>
+            )}
+            {activeHero && beatsMe.length === 0 && iBeat.length === 0 && (
+              <div style={styles.emptyState}>
+                У {activeHero.localized_name} нет связей выше {Math.round(EDGE_WINRATE_THRESHOLD * 100)}%
+                при {MIN_GAMES_EDGE}+ совместных проф. матчах. Это не баг: в про-сцене этот герой либо
+                играется редко, либо ни с кем не даёт заметного перекоса.
               </div>
             )}
             {activeHero && (
