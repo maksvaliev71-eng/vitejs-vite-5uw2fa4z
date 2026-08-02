@@ -280,10 +280,17 @@ function flattenPatchSection(value) {
    fails, the UI falls back to the English names from dotaconstants. */
 let ruLocalePromise = null;
 
+/* d2vpkr only tracks the English localization, so these point at mirrors that keep the
+   full language set. Each candidate is tried in order and validated before use. */
+/* Valve's own Russian text. abilities_russian.txt is the right file: it holds tooltips for
+   both abilities and items (items use DOTA_Tooltip_ability_item_* keys) and is far smaller
+   than the full dota_russian.txt. The tracker repo moved orgs, hence several candidates. */
 const RU_SOURCES = [
-  "https://raw.githubusercontent.com/dotabuff/d2vpkr/master/dota/resource/localization/dota_russian.txt",
-  "https://raw.githubusercontent.com/dotabuff/d2vpkr/master/dota/panorama/localization/dota_russian.txt",
-  "https://raw.githubusercontent.com/dotabuff/d2vpk/master/dota/resource/dota_russian.txt",
+  "https://raw.githubusercontent.com/SteamTracking/GameTracking-Dota2/master/game/dota/pak01_dir/resource/localization/abilities_russian.txt",
+  "https://cdn.jsdelivr.net/gh/SteamTracking/GameTracking-Dota2@master/game/dota/pak01_dir/resource/localization/abilities_russian.txt",
+  "https://raw.githubusercontent.com/SteamDatabase/GameTracking-Dota2/master/game/dota/pak01_dir/resource/localization/abilities_russian.txt",
+  "https://raw.githubusercontent.com/SteamTracking/GameTracking-Dota2/master/game/dota/pak01_dir/resource/localization/dota_russian.txt",
+  "https://raw.githubusercontent.com/SteamTracking/GameTracking-Dota2/master/game/dota/panorama/localization/abilities_russian.txt",
 ];
 
 function decodeLocaleBuffer(buf) {
@@ -323,19 +330,27 @@ async function getRuLocale() {
   }
   ruLocalePromise = (async () => {
     let text = null;
+    const tried = [];
     for (const url of RU_SOURCES) {
       try {
         const r = await fetch(url);
-        if (r.ok) {
-          text = decodeLocaleBuffer(await r.arrayBuffer());
-          if (text && text.includes("DOTA_Tooltip")) break;
-          text = null;
+        if (!r.ok) {
+          tried.push(`${r.status} ${url}`);
+          continue;
         }
-      } catch {
-        // try the next mirror
+        text = decodeLocaleBuffer(await r.arrayBuffer());
+        if (text && text.includes("DOTA_Tooltip")) break;
+        tried.push(`формат не подошёл: ${url}`);
+        text = null;
+      } catch (e) {
+        tried.push(`ошибка сети: ${url}`);
       }
     }
-    if (!text) throw new Error("no locale source");
+    if (!text) {
+      // surfaced in the console so a broken mirror is diagnosable instead of silently English
+      console.warn("[DraftHex] русская локализация не загрузилась:\n" + tried.join("\n"));
+      throw new Error("no locale source");
+    }
 
     const kv = parseValveKV(text);
     const out = {};
@@ -4065,7 +4080,7 @@ const styles = {
     background: "rgba(7,5,13,0.82)", backdropFilter: "blur(10px)",
     WebkitBackdropFilter: "blur(10px)",
     borderBottom: "1px solid #1D1230",
-    marginLeft: -20, marginRight: -20, paddingLeft: 20, paddingRight: 20,
+    maxWidth: "100%", minWidth: 0,
   },
   brandRow: { display: "flex", alignItems: "center", gap: 12, minWidth: 0 },
   brandWordmark: {
@@ -4148,7 +4163,7 @@ const styles = {
   homeCardTitle: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 16, color: "#F2EAFB" },
   homeCardDesc: { fontSize: 12, color: "#9C8FB0", lineHeight: 1.4 },
 
-  layout: { display: "grid", gridTemplateColumns: "260px 1fr", gap: 20, alignItems: "start" },
+  layout: { display: "grid", gridTemplateColumns: "260px minmax(0, 1fr)", gap: 20, alignItems: "start" },
   sidebar: { background: "#0E081A", border: "1px solid #2A1A40", borderRadius: 10, padding: 8, display: "flex", flexDirection: "column", gap: 8 },
   chipList: { display: "flex", flexDirection: "column", gap: 4, maxHeight: "calc(100vh - 220px)", overflowY: "auto" },
   heroChip: {
@@ -4158,8 +4173,8 @@ const styles = {
   heroChipIcon: { width: 24, height: 24, borderRadius: 4, flexShrink: 0 },
   heroChipName: { fontSize: 13, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   attrDot: { width: 8, height: 8, borderRadius: "50%", flexShrink: 0 },
-  detail: { display: "flex", flexDirection: "column", gap: 20 },
-  card: { background: "#140B22", border: "1px solid #2F1F49", borderRadius: 16, padding: 22, boxShadow: "0 0 40px rgba(109,40,217,0.12)" },
+  detail: { display: "flex", flexDirection: "column", gap: 20, minWidth: 0 },
+  card: { background: "#140B22", border: "1px solid #2F1F49", borderRadius: 16, padding: 22, boxShadow: "0 0 40px rgba(109,40,217,0.12)", minWidth: 0, overflow: "hidden" },
   cardTop: { display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" },
   portrait: { width: 76, height: 76, borderRadius: 10, objectFit: "cover", flexShrink: 0 },
   heroName: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 26, letterSpacing: "0.01em" },
@@ -4177,8 +4192,8 @@ const styles = {
     position: "absolute", top: 0, left: 0, width: 76, height: 76, display: "flex", alignItems: "center",
     justifyContent: "center", fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 15,
   },
-  twoCol: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 },
-  panel: { background: "#140B22", border: "1px solid #2F1F49", borderRadius: 14, padding: 18, boxShadow: "0 0 30px rgba(109,40,217,0.10)" },
+  twoCol: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, minWidth: 0 },
+  panel: { background: "#140B22", border: "1px solid #2F1F49", borderRadius: 14, padding: 18, boxShadow: "0 0 30px rgba(109,40,217,0.10)", minWidth: 0, overflow: "hidden" },
   panelHeader: { display: "flex", alignItems: "center", gap: 8, marginBottom: 12, paddingBottom: 10, borderBottom: "1px solid #1D1230" },
   panelTitle: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 15, letterSpacing: "0.04em" },
   mutedText: { fontSize: 12, color: "#9C8FB0" },
@@ -4192,7 +4207,7 @@ const styles = {
   itemName: { fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   matchupName: { fontSize: 13, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   matchupPct: { fontSize: 13, fontWeight: 700, whiteSpace: "nowrap", flexShrink: 0, fontFamily: "'Rajdhani', sans-serif" },
-  body: { maxWidth: 1040, margin: "0 auto", display: "flex", flexDirection: "column", gap: 20 },
+  body: { maxWidth: 1040, margin: "0 auto", display: "flex", flexDirection: "column", gap: 20, minWidth: 0, width: "100%" },
   heroSelectWrap: { position: "relative", display: "flex", alignItems: "center", gap: 10 },
   heroSelectLabel: { fontSize: 13, color: "#9C8FB0" },
   heroSelectBtn: {
@@ -4213,7 +4228,8 @@ const styles = {
   toolbar: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" },
   segment: {
     display: "flex", gap: 6, background: "#0E081A", border: "1px solid #2C1C42", borderRadius: 8, padding: 4,
-    overflowX: "auto", WebkitOverflowScrolling: "touch", maxWidth: "100%",
+    overflowX: "auto", WebkitOverflowScrolling: "touch", maxWidth: "100%", minWidth: 0,
+    scrollbarWidth: "none",
   },
   segmentBtn: {
     background: "transparent", border: "none", color: "#9C8FB0", fontSize: 12, padding: "6px 10px", borderRadius: 6,
