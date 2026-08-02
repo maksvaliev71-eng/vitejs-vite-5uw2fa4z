@@ -700,6 +700,10 @@ export default function App() {
   });
 
   useEffect(() => {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }, [tab]);
+
+  useEffect(() => {
     toastListener = setToast;
     return () => {
       toastListener = null;
@@ -810,6 +814,14 @@ export default function App() {
         @keyframes toastIn {
           from { opacity: 0; transform: translateY(12px); }
           to { opacity: 1; transform: translateY(0); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+          *, *::before, *::after {
+            animation-duration: 0.01ms !important;
+            animation-iteration-count: 1 !important;
+            transition-duration: 0.01ms !important;
+            scroll-behavior: auto !important;
+          }
         }
         .home-text-col { text-align: left; }
         @media (max-width: 860px) {
@@ -1234,7 +1246,7 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
           <PeersPanel peers={data.peers} />
 
           {premium ? (
-            <PremiumProfilePanels matches={data.matches} />
+            <PremiumProfilePanels matches={data.matches} accountId={accountId} heroes={heroes} />
           ) : (
             <PremiumLock
               title="Разбор по позициям и форма"
@@ -2982,7 +2994,157 @@ function PremiumLock({ title, text }) {
 
 const LANE_ROLE_LABELS = { 1: "Сейф-лейн", 2: "Мид", 3: "Оффлейн", 4: "Джунгли" };
 
-function PremiumProfilePanels({ matches }) {
+/* Hero-pair synergy needs the full roster of each match, which the match-list endpoint
+   doesn't include — so it pulls per-match details. That's one request per match, hence the
+   explicit opt-in button, the progress bar and a cap on how many matches are analysed. */
+const SYNERGY_MATCH_LIMIT = 40;
+
+async function fetchAllySynergy(accountId, matches, onProgress) {
+  const cacheKey = `dw_synergy_${accountId}`;
+  const cached = readLocalCache(cacheKey, PLAYER_TTL_MS * 8);
+  if (cached) return cached;
+
+  const recent = [...matches]
+    .filter((m) => m.match_id && m.player_slot != null && m.radiant_win != null)
+    .sort((a, b) => (b.start_time || 0) - (a.start_time || 0))
+    .slice(0, SYNERGY_MATCH_LIMIT);
+
+  const acc = {};
+  let analysed = 0;
+  let failed = 0;
+
+  for (let i = 0; i < recent.length; i++) {
+    const m = recent[i];
+    try {
+      const r = await rateLimitedFetch(`https://api.opendota.com/api/matches/${m.match_id}`);
+      if (!r.ok) throw new Error("network");
+      const detail = await r.json();
+      const players = detail.players || [];
+      const me = players.find((p) => String(p.account_id) === String(accountId));
+      const mySlot = me ? me.player_slot : m.player_slot;
+      const iAmRadiant = mySlot < 128;
+      const won = iAmRadiant === detail.radiant_win;
+
+      players.forEach((p) => {
+        if (!p.hero_id) return;
+        const sameTeam = (p.player_slot < 128) === iAmRadiant;
+        if (!sameTeam) return;
+        if (p.player_slot === mySlot) return; // skip the player themselves
+        if (!acc[p.hero_id]) acc[p.hero_id] = { games: 0, wins: 0 };
+        acc[p.hero_id].games += 1;
+        if (won) acc[p.hero_id].wins += 1;
+      });
+      analysed += 1;
+    } catch {
+      failed += 1;
+    }
+    onProgress(i + 1, recent.length);
+  }
+
+  const result = { acc, analysed, failed, total: recent.length };
+  try {
+    writeLocalCache(cacheKey, result);
+  } catch {
+    // quota — recalculated next time
+  }
+  return result;
+}
+
+function HeroSynergyPanel({ accountId, matches, heroes }) {
+  const [state, setState] = useState({ status: "idle", data: null, progress: null });
+
+  const heroById = (id) => heroes.find((h) => h.id === id);
+
+  async function run() {
+    setState({ status: "loading", data: null, progress: { done: 0, total: SYNERGY_MATCH_LIMIT } });
+    try {
+      const data = await fetchAllySynergy(accountId, matches, (done, total) =>
+        setState((s) => ({ ...s, progress: { done, total } }))
+      );
+      setState({ status: "done", data, progress: null });
+      if (data.failed > 0) notify(`${data.failed} матчей не удалось разобрать — показываю остальные.`);
+    } catch {
+      setState({ status: "error", data: null, progress: null });
+      notify("Не удалось посчитать синергию по героям.");
+    }
+  }
+
+  const rows = useMemo(() => {
+    if (!state.data) return [];
+    return Object.entries(state.data.acc)
+      .map(([heroId, v]) => ({ hero: heroById(Number(heroId)), games: v.games, winRate: v.wins / v.games }))
+      .filter((r) => r.hero && r.games >= 3)
+      .sort((a, b) => b.winRate - a.winRate || b.games - a.games)
+      .slice(0, 12);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.data, heroes]);
+
+  return (
+    <div style={{ ...styles.panel, border: "1px solid #4A3D1E" }}>
+      <div style={styles.panelHeader}>
+        <Handshake size={16} color="#E5B33D" />
+        <span style={{ ...styles.panelTitle, color: "#E5B33D" }}>Синергия по героям союзников</span>
+        {state.status === "idle" && (
+          <button style={{ ...styles.tourGo, marginLeft: "auto" }} onClick={run}>Посчитать</button>
+        )}
+        {state.status === "done" && (
+          <button style={{ ...styles.tourGo, marginLeft: "auto" }} onClick={run}>Пересчитать</button>
+        )}
+      </div>
+
+      {state.status === "idle" && (
+        <div style={{ ...styles.mutedText, fontSize: 12 }}>
+          Разберём последние {SYNERGY_MATCH_LIMIT} матчей и посмотрим, с какими героями в союзниках
+          ты выигрываешь чаще. Это по одному запросу на матч, поэтому займёт около минуты.
+        </div>
+      )}
+
+      {state.status === "loading" && (
+        <>
+          <div style={{ ...styles.mutedText, fontSize: 12, marginBottom: 8 }}>
+            Разбираю матчи: {state.progress?.done ?? 0} / {state.progress?.total ?? 0}
+          </div>
+          <div style={styles.progressTrack}>
+            <div
+              style={{
+                ...styles.progressFill,
+                width: `${((state.progress?.done ?? 0) / (state.progress?.total || 1)) * 100}%`,
+              }}
+            />
+          </div>
+        </>
+      )}
+
+      {state.status === "error" && <div style={styles.emptyState}>Не удалось посчитать. Попробуй позже.</div>}
+
+      {state.status === "done" && rows.length === 0 && (
+        <div style={styles.emptyState}>
+          Нет героев, которые встречались в союзниках хотя бы 3 раза за последние {state.data.analysed} матчей.
+        </div>
+      )}
+
+      {state.status === "done" && rows.map((r) => (
+        <div key={r.hero.id} style={styles.roleRow}>
+          <HeroIcon hero={r.hero} style={styles.matchupIcon} />
+          <span style={styles.matchupName}>{r.hero.localized_name}</span>
+          <span style={styles.mutedText}>{r.games} игр</span>
+          <span style={{ ...styles.rolePct, color: r.winRate >= 0.5 ? "#5FCB8E" : "#E2574C" }}>
+            {(r.winRate * 100).toFixed(0)}%
+          </span>
+        </div>
+      ))}
+
+      {state.status === "done" && (
+        <div style={{ ...styles.mutedText, fontSize: 11, marginTop: 8 }}>
+          По {state.data.analysed} разобранным матчам. Показаны герои, встречавшиеся в союзниках 3+ раза —
+          на меньшей выборке процент ничего не значит.
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PremiumProfilePanels({ matches, accountId, heroes }) {
   const byLane = useMemo(() => {
     if (!Array.isArray(matches)) return [];
     const acc = {};
@@ -3040,6 +3202,8 @@ function PremiumProfilePanels({ matches }) {
           </div>
         ))}
       </div>
+
+      <HeroSynergyPanel accountId={accountId} matches={matches} heroes={heroes} />
 
       {form.length > 3 && (
         <div style={{ ...styles.panel, border: "1px solid #4A3D1E" }}>
@@ -3910,7 +4074,7 @@ const styles = {
   heroChipIcon: { width: 24, height: 24, borderRadius: 4, flexShrink: 0 },
   heroChipName: { fontSize: 13, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   attrDot: { width: 8, height: 8, borderRadius: "50%", flexShrink: 0 },
-  detail: { display: "flex", flexDirection: "column", gap: 16 },
+  detail: { display: "flex", flexDirection: "column", gap: 20 },
   card: { background: "#140B22", border: "1px solid #2F1F49", borderRadius: 16, padding: 22, boxShadow: "0 0 40px rgba(109,40,217,0.12)" },
   cardTop: { display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" },
   portrait: { width: 76, height: 76, borderRadius: 10, objectFit: "cover", flexShrink: 0 },
@@ -3944,7 +4108,7 @@ const styles = {
   itemName: { fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
   matchupName: { fontSize: 13, flex: 1 },
   matchupPct: { fontSize: 12, fontWeight: 600 },
-  body: { maxWidth: 980, margin: "0 auto", display: "flex", flexDirection: "column", gap: 16 },
+  body: { maxWidth: 1040, margin: "0 auto", display: "flex", flexDirection: "column", gap: 20 },
   heroSelectWrap: { position: "relative", display: "flex", alignItems: "center", gap: 10 },
   heroSelectLabel: { fontSize: 13, color: "#9C8FB0" },
   heroSelectBtn: {
