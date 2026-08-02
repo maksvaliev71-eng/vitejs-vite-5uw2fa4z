@@ -282,12 +282,22 @@ let ruLocalePromise = null;
 
 const RU_SOURCES = [
   "https://raw.githubusercontent.com/dotabuff/d2vpkr/master/dota/resource/localization/dota_russian.txt",
+  "https://raw.githubusercontent.com/dotabuff/d2vpkr/master/dota/panorama/localization/dota_russian.txt",
   "https://raw.githubusercontent.com/dotabuff/d2vpk/master/dota/resource/dota_russian.txt",
 ];
 
+function decodeLocaleBuffer(buf) {
+  const bytes = new Uint8Array(buf);
+  // Valve ships localization files as UTF-16; reading them as UTF-8 yields garbage
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) return new TextDecoder("utf-16le").decode(buf);
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) return new TextDecoder("utf-16be").decode(buf);
+  return new TextDecoder("utf-8").decode(buf);
+}
+
 function parseValveKV(text) {
   const map = {};
-  const re = /^\s*"([^"]+)"\s+"([\s\S]*?)"\s*$/gm;
+  // values may span several lines, so match across newlines and stop at the closing quote
+  const re = /"([^"\r\n]+)"\s*"((?:[^"\\]|\\.)*)"/g;
   let m;
   while ((m = re.exec(text)) !== null) {
     map[m[1]] = m[2];
@@ -317,8 +327,9 @@ async function getRuLocale() {
       try {
         const r = await fetch(url);
         if (r.ok) {
-          text = await r.text();
-          break;
+          text = decodeLocaleBuffer(await r.arrayBuffer());
+          if (text && text.includes("DOTA_Tooltip")) break;
+          text = null;
         }
       } catch {
         // try the next mirror
@@ -824,10 +835,16 @@ export default function App() {
           }
         }
         .home-text-col { text-align: left; }
+        .rank-scroll { overflow-x: auto; scrollbar-width: none; }
+        .rank-scroll::-webkit-scrollbar { display: none; }
         @media (max-width: 860px) {
           .layout-cols { grid-template-columns: 1fr !important; }
+          .two-col { grid-template-columns: 1fr !important; }
+          .role-grid { grid-template-columns: 1fr !important; }
           .toolbar { flex-direction: column !important; align-items: stretch !important; }
           .draft-grid { grid-template-columns: 1fr !important; }
+          .two-col { grid-template-columns: 1fr !important; }
+          .rank-scroll { overflow-x: auto; }
           .home-hero { flex-direction: column !important; gap: 20px !important; }
           .hero-portrait-wrap { margin: 0 !important; }
           .home-text-col { text-align: center !important; }
@@ -888,7 +905,6 @@ export default function App() {
       <Toast message={toast} onClose={() => setToast(null)} />
       {showTour && <TourOverlay onClose={closeTour} onGo={(k) => { setTab(k); closeTour(); }} />}
 
-      <footer style={styles.footer}>Данные: OpenDota API</footer>
     </div>
   );
 }
@@ -1145,14 +1161,6 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
 
   return (
     <div style={styles.body}>
-      <div style={styles.methodNote}>
-        <Info size={13} color="#9C8FB0" style={{ flexShrink: 0, marginTop: 2 }} />
-        <span>
-          Данные публичные (через OpenDota, без входа в Steam) — работает, только если у тебя в Dota 2 включено
-          "Expose Public Match Data" в настройках. Нужен Steam32 ID — вставь его или ссылку вида
-          steamcommunity.com/profiles/7656119...
-        </span>
-      </div>
 
       <form onSubmit={handleSubmit} style={styles.profileForm}>
         <input
@@ -1218,9 +1226,6 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
                     <Line type="monotone" dataKey="winRate" stroke="#B24BF3" strokeWidth={2} dot={{ fill: "#B24BF3", r: 3 }} />
                   </LineChart>
                 </ResponsiveContainer>
-              </div>
-              <div style={{ ...styles.mutedText, fontSize: 11, marginTop: 6 }}>
-                По последним {data.matches.length} матчам (реальная история, без выдумки).
               </div>
             </div>
           )}
@@ -1291,16 +1296,13 @@ function PeersPanel({ peers }) {
           </span>
         </div>
       ))}
-      <div style={{ ...styles.mutedText, fontSize: 11, marginTop: 8 }}>
-        Реальные тиммейты, с которыми ты сыграл 5+ матчей, и твой винрейт вместе с ними.
-        Синергия по конкретным парам героев — отдельная задача: для неё нужно тянуть детали каждого матча.
-      </div>
     </div>
   );
 }
 
 function HeroCardTab({ heroes, selected, selectedId, setSelectedId }) {
   const [query, setQuery] = useState("");
+  const [cardBracket, setCardBracket] = useState("all");
   const { data: matchups, loading: matchupsLoading } = useMatchups(selectedId);
 
   const filtered = useMemo(() => {
@@ -1321,7 +1323,9 @@ function HeroCardTab({ heroes, selected, selectedId, setSelectedId }) {
 
   const worst = ranked.slice(0, 5);
   const best = [...ranked].sort((a, b) => b.winRate - a.winRate).slice(0, 5);
-  const proWinRate = selected.pro_pick ? (selected.pro_win / selected.pro_pick) * 100 : null;
+  const bracket = BRACKETS.find((b) => b.key === cardBracket) || BRACKETS[0];
+  const bStats = bracketStats(selected, bracket);
+  const cardWinRate = bStats.picks ? (bStats.wins / bStats.picks) * 100 : null;
   const attr = ATTR[selected.primary_attr] || ATTR.all;
 
   return (
@@ -1373,19 +1377,32 @@ function HeroCardTab({ heroes, selected, selectedId, setSelectedId }) {
                 ))}
               </div>
             </div>
-            <RatingGauge value={proWinRate} color={attr.color} />
+            <RatingGauge value={cardWinRate} color={attr.color} />
           </div>
+
+          <div className="rank-scroll" style={styles.segment}>
+            {BRACKETS.map((b) => (
+              <button
+                key={b.key}
+                style={{ ...styles.segmentBtn, ...(cardBracket === b.key ? styles.segmentBtnActive : {}) }}
+                onClick={() => setCardBracket(b.key)}
+              >
+                {b.label}
+              </button>
+            ))}
+          </div>
+
           <div style={styles.statsGrid}>
-            <Stat label="Проф. винрейт" value={proWinRate ? `${proWinRate.toFixed(1)}%` : "нет данных"} />
-            <Stat label="Проф. пики" value={selected.pro_pick ?? "—"} />
-            <Stat label="Проф. баны" value={selected.pro_ban ?? "—"} />
+            <Stat label="Винрейт" value={cardWinRate ? `${cardWinRate.toFixed(1)}%` : "нет данных"} />
+            <Stat label="Матчей" value={bStats.picks ? bStats.picks.toLocaleString("ru-RU") : "—"} />
+            <Stat label="Баны в про" value={selected.pro_ban ?? "—"} />
             <Stat label="Тип атаки" value={selected.attack_type === "Melee" ? "Ближний бой" : "Дальний бой"} />
           </div>
         </div>
 
         <PatchWinRateBadge heroId={selectedId} />
 
-        <div style={styles.twoCol}>
+        <div className="two-col" style={styles.twoCol}>
           <MatchupPanel
             title="Худшие матчапы"
             icon={<TrendingDown size={16} color="#E2574C" />}
@@ -1393,7 +1410,7 @@ function HeroCardTab({ heroes, selected, selectedId, setSelectedId }) {
             items={worst}
             loading={matchupsLoading}
             heroById={heroById}
-            labelFor={(m) => `${(m.winRate * 100).toFixed(0)}% побед против`}
+            labelFor={(m) => `${(m.winRate * 100).toFixed(0)}%`}
           />
           <MatchupPanel
             title="Лучшие матчапы"
@@ -1402,11 +1419,11 @@ function HeroCardTab({ heroes, selected, selectedId, setSelectedId }) {
             items={best}
             loading={matchupsLoading}
             heroById={heroById}
-            labelFor={(m) => `${(m.winRate * 100).toFixed(0)}% побед против`}
+            labelFor={(m) => `${(m.winRate * 100).toFixed(0)}%`}
           />
         </div>
 
-        <div style={styles.twoCol}>
+        <div className="two-col" style={styles.twoCol}>
           <ItemsPanel heroId={selectedId} />
           <LaneRoleChart heroId={selectedId} />
         </div>
@@ -1483,7 +1500,6 @@ function HeroMonthlyTrendChart({ heroId }) {
           </ResponsiveContainer>
         </div>
       )}
-      <div style={{ ...styles.mutedText, fontSize: 10, marginTop: 6 }}>Экспериментально, за последние ~6 месяцев.</div>
     </div>
   );
 }
@@ -1533,10 +1549,6 @@ function ItemsPanel({ heroId }) {
           })}
         </div>
       )}
-      <div style={{ ...styles.mutedText, fontSize: 11, marginTop: 10 }}>
-        Реальная статистика покупок (OpenDota). Предметы, которые контрят героя — отдельная нерешённая задача:
-        такой связи нет в открытых данных, это ручная экспертная разметка, а не статистика.
-      </div>
     </div>
   );
 }
@@ -1595,10 +1607,6 @@ function LaneRoleChart({ heroId }) {
           </ResponsiveContainer>
         </div>
       )}
-      <div style={{ ...styles.mutedText, fontSize: 11, marginTop: 8 }}>
-        Реальные данные OpenDota, накопленные за всё время наблюдений — это не помесячный тренд
-        (для него нужны более тяжёлые запросы, отдельная задача).
-      </div>
     </div>
   );
 }
@@ -1664,7 +1672,7 @@ function MatchupPanel({ title, icon, accent, items, loading, heroById, labelFor 
 const ROLE_ORDER = ["Carry", "Support", "Nuker", "Disabler", "Initiator", "Durable", "Escape", "Pusher", "Jungler"];
 
 const BRACKETS = [
-  { key: "pro", label: "Про", pickField: "pro_pick", winField: "pro_win", minPicks: 5 },
+  { key: "all", label: "Все ранги", minPicks: 200 },
   { key: "1", label: "Herald", pickField: "1_pick", winField: "1_win", minPicks: 40 },
   { key: "2", label: "Guardian", pickField: "2_pick", winField: "2_win", minPicks: 40 },
   { key: "3", label: "Crusader", pickField: "3_pick", winField: "3_win", minPicks: 40 },
@@ -1673,7 +1681,26 @@ const BRACKETS = [
   { key: "6", label: "Ancient", pickField: "6_pick", winField: "6_win", minPicks: 40 },
   { key: "7", label: "Divine", pickField: "7_pick", winField: "7_win", minPicks: 40 },
   { key: "8", label: "Immortal", pickField: "8_pick", winField: "8_win", minPicks: 40 },
+  { key: "pro", label: "Про-сцена", pickField: "pro_pick", winField: "pro_win", minPicks: 5 },
 ];
+
+const RANK_FIELDS = ["1", "2", "3", "4", "5", "6", "7", "8"];
+
+/* "Все ранги" = sum of every public rank bracket. Public matches are what most players
+   actually queue into, so this is the default rather than the tiny pro sample. */
+function bracketStats(hero, bracket) {
+  if (!hero) return { picks: 0, wins: 0 };
+  if (bracket.key === "all") {
+    let picks = 0;
+    let wins = 0;
+    RANK_FIELDS.forEach((n) => {
+      picks += hero[`${n}_pick`] || 0;
+      wins += hero[`${n}_win`] || 0;
+    });
+    return { picks, wins };
+  }
+  return { picks: hero[bracket.pickField] || 0, wins: hero[bracket.winField] || 0 };
+}
 
 /* ---------- hero pool (persisted in localStorage) ---------- */
 
@@ -1954,12 +1981,12 @@ function DraftTab({ heroes, onOpenCard }) {
         />
       </div>
 
-      <div style={styles.twoCol}>
+      <div className="two-col" style={styles.twoCol}>
         <SuggestionPanel title="Лучший пик за Radiant" color="#5FCB8E" items={suggestions("radiant")} heroById={heroById} onOpenCard={onOpenCard} />
         <SuggestionPanel title="Лучший пик за Dire" color="#E2574C" items={suggestions("dire")} heroById={heroById} onOpenCard={onOpenCard} />
       </div>
 
-      <div style={styles.twoCol}>
+      <div className="two-col" style={styles.twoCol}>
         <GamePlanPanel title="План игры — Radiant" color="#5FCB8E" plan={gamePlanFor(radiant, dire)} heroById={heroById} onOpenCard={onOpenCard} />
         <GamePlanPanel title="План игры — Dire" color="#E2574C" plan={gamePlanFor(dire, radiant)} heroById={heroById} onOpenCard={onOpenCard} />
       </div>
@@ -2006,16 +2033,6 @@ function DraftTab({ heroes, onOpenCard }) {
           text="Сохраняй разобранные драфты и возвращайся к ним позже. Входит в Premium — включить демо можно на вкладке «Тарифы»."
         />
       )}
-
-      <div style={styles.methodNote}>
-        <Info size={13} color="#9C8FB0" style={{ flexShrink: 0, marginTop: 2 }} />
-        <span>
-          Позиции 1–5 — фиксированные стандартные слоты (не определяются автоматически, выбираешь героя в нужный
-          слот сам). Перевес, рекомендации и план игры считаются как средние реальных винрейтов между выбранными
-          героями (проф. матчи). Это не учитывает синергию союзников, предметы и стадию игры (линия/мид/лейт) —
-          таких данных в открытом API нет, добавлять их выдумкой не буду.
-        </span>
-      </div>
 
       {picker && (
         <div style={styles.pickerOverlay} onClick={() => setPicker(null)}>
@@ -2217,15 +2234,14 @@ function trustTier(coverage, total) {
 }
 
 function RolesTab({ heroes, onPick }) {
-  const [bracketKey, setBracketKey] = useState("pro");
+  const [bracketKey, setBracketKey] = useState("all");
   const bracket = BRACKETS.find((b) => b.key === bracketKey);
 
   const byRole = useMemo(() => {
     const map = {};
     ROLE_ORDER.forEach((r) => (map[r] = []));
     heroes.forEach((h) => {
-      const picks = h[bracket.pickField];
-      const wins = h[bracket.winField];
+      const { picks, wins } = bracketStats(h, bracket);
       if (!picks || picks < bracket.minPicks) return;
       const winRate = wins / picks;
       (h.roles || []).forEach((r) => {
@@ -2248,15 +2264,6 @@ function RolesTab({ heroes, onPick }) {
             {b.label}
           </button>
         ))}
-      </div>
-
-      <div style={styles.methodNote}>
-        <Info size={13} color="#9C8FB0" style={{ flexShrink: 0, marginTop: 2 }} />
-        <span>
-          Ранжирование по винрейту в ранге «{bracket.label}» среди героев с {bracket.minPicks}+ пиками в этом
-          ранге. OpenDota не делит героев на позиции 1–5 (керри/мид/оффлейн/сапорт-4/сапорт-5) — здесь показаны
-          реальные теги ролей из их базы. Точное деление на позиции — отдельная задача на будущее.
-        </span>
       </div>
 
       {bracketKey === "pro" && <TopBansPanel heroes={heroes} onPick={onPick} />}
@@ -2478,14 +2485,6 @@ function CounterTableTab({ heroes, selected, selectedId, setSelectedId }) {
             })}
           </div>
         )}
-      </div>
-
-      <div style={styles.methodNote}>
-        <Info size={13} color="#9C8FB0" style={{ flexShrink: 0, marginTop: 2 }} />
-        <span>
-          Скор контра считается по отклонению винрейта от 50% (0 — нейтрально, 100 — сильный перекос). «Тип контра»
-          подключим, когда доберёмся до анализа способностей и предметов.
-        </span>
       </div>
     </div>
   );
@@ -3135,10 +3134,6 @@ function HeroSynergyPanel({ accountId, matches, heroes }) {
       ))}
 
       {state.status === "done" && (
-        <div style={{ ...styles.mutedText, fontSize: 11, marginTop: 8 }}>
-          По {state.data.analysed} разобранным матчам. Показаны герои, встречавшиеся в союзниках 3+ раза —
-          на меньшей выборке процент ничего не значит.
-        </div>
       )}
     </div>
   );
@@ -3228,7 +3223,7 @@ function PremiumProfilePanels({ matches, accountId, heroes }) {
             </ResponsiveContainer>
           </div>
           <div style={{ ...styles.mutedText, fontSize: 11, marginTop: 6 }}>
-            Жёлтая линия — золото в минуту, фиолетовая — опыт. По последним {form.length} матчам.
+            Золото (жёлтая) и опыт (фиолетовая) в минуту.
           </div>
         </div>
       )}
@@ -3434,15 +3429,6 @@ function ReferenceTab({ heroes }) {
           </div>
         </>
       )}
-
-      <div style={styles.methodNote}>
-        <Info size={13} color="#9C8FB0" style={{ flexShrink: 0, marginTop: 2 }} />
-        <span>
-          Русские названия и описания — официальная локализация Valve из файлов игры, английские —
-          из базы dotaconstants. Под русским названием показано оригинальное. Переводов от себя я не
-          добавляю: если у чего-то нет официального русского текста, останется английский.
-        </span>
-      </div>
     </div>
   );
 }
@@ -3492,15 +3478,6 @@ function PatchesTab() {
         {!state.loading && !state.error && list.map((p, i) => (
           <PatchRow key={p.name} patch={p} isLatest={i === 0} />
         ))}
-      </div>
-
-      <div style={styles.methodNote}>
-        <Info size={13} color="#9C8FB0" style={{ flexShrink: 0, marginTop: 2 }} />
-        <span>
-          Тексты изменений — официальные патчноуты Valve, разобранные проектом dotaconstants.
-          Для части старых патчей разбора может не быть — тогда покажется только дата.
-          Ничего от себя я сюда не дописываю.
-        </span>
       </div>
     </div>
   );
@@ -3654,15 +3631,6 @@ function PricingTab() {
           </button>
         </div>
       </div>
-
-      <div style={styles.methodNote}>
-        <Info size={13} color="#9C8FB0" style={{ flexShrink: 0, marginTop: 2 }} />
-        <span>
-          Платёжная система ещё не подключена — оплатить ничего нельзя, это описание планируемых
-          тарифов. Кнопка выше включает демо-режим: премиум-разделы станут видны локально в этом
-          браузере, чтобы можно было посмотреть и доработать их содержимое.
-        </span>
-      </div>
     </div>
   );
 }
@@ -3683,7 +3651,9 @@ function CompareTab({ heroes }) {
   const left = heroes.find((h) => h.id === leftId) || null;
   const right = heroes.find((h) => h.id === rightId) || null;
 
+  const [premium] = usePremium();
   const { data: leftMatchups, loading: leftLoading } = useMatchups(leftId);
+  const { data: rightMatchups } = useMatchups(rightId);
 
   const headToHead = useMemo(() => {
     if (!leftMatchups || !rightId) return null;
@@ -3692,14 +3662,18 @@ function CompareTab({ heroes }) {
     return { winRate: m.wins / m.games_played, games: m.games_played };
   }, [leftMatchups, rightId]);
 
-  function proWr(h) {
-    return h && h.pro_pick ? (h.pro_win / h.pro_pick) * 100 : null;
+  function publicWr(h) {
+    const s = bracketStats(h, BRACKETS[0]);
+    return s.picks ? (s.wins / s.picks) * 100 : null;
+  }
+  function publicPicks(h) {
+    return h ? bracketStats(h, BRACKETS[0]).picks || null : null;
   }
 
   const rows = [
-    { label: "Проф. винрейт", l: proWr(left), r: proWr(right), fmt: (v) => (v == null ? "—" : `${v.toFixed(1)}%`), higher: true },
-    { label: "Проф. пики", l: left?.pro_pick ?? null, r: right?.pro_pick ?? null, fmt: (v) => (v == null ? "—" : v), higher: true },
-    { label: "Проф. баны", l: left?.pro_ban ?? null, r: right?.pro_ban ?? null, fmt: (v) => (v == null ? "—" : v), higher: true },
+    { label: "Винрейт (все ранги)", l: publicWr(left), r: publicWr(right), fmt: (v) => (v == null ? "—" : `${v.toFixed(1)}%`), higher: true },
+    { label: "Матчей", l: publicPicks(left), r: publicPicks(right), fmt: (v) => (v == null ? "—" : v.toLocaleString("ru-RU")), higher: true },
+    { label: "Баны в про", l: left?.pro_ban ?? null, r: right?.pro_ban ?? null, fmt: (v) => (v == null ? "—" : v), higher: true },
     { label: "Базовое здоровье", l: left?.base_health ?? null, r: right?.base_health ?? null, fmt: (v) => v ?? "—", higher: true },
     { label: "Базовая броня", l: left?.base_armor ?? null, r: right?.base_armor ?? null, fmt: (v) => v ?? "—", higher: true },
     { label: "Скорость передвижения", l: left?.move_speed ?? null, r: right?.move_speed ?? null, fmt: (v) => v ?? "—", higher: true },
@@ -3767,14 +3741,126 @@ function CompareTab({ heroes }) {
         })}
       </div>
 
-      <div style={styles.methodNote}>
-        <Info size={13} color="#9C8FB0" style={{ flexShrink: 0, marginTop: 2 }} />
-        <span>
-          Характеристики — базовые значения героев из OpenDota (без учёта уровня, талантов и предметов).
-          Прямой матчап считается только по матчам, где эти двое реально встречались в проф. играх.
-        </span>
-      </div>
+      {premium ? (
+        <DeepComparePanels
+          left={left}
+          right={right}
+          leftMatchups={leftMatchups}
+          rightMatchups={rightMatchups}
+          heroes={heroes}
+        />
+      ) : (
+        <PremiumLock
+          title="Глубокое сравнение"
+          text="Винрейт обоих героев по каждому рангу, общие уязвимости и общие жертвы — кого они оба обыгрывают и кому оба проигрывают. Входит в Premium — включить демо можно на вкладке «Тарифы»."
+        />
+      )}
     </div>
+  );
+}
+
+function DeepComparePanels({ left, right, leftMatchups, rightMatchups, heroes }) {
+  const heroById = (id) => heroes.find((h) => h.id === id);
+
+  const rankData = useMemo(() => {
+    return BRACKETS.filter((b) => b.key !== "all" && b.key !== "pro").map((b) => {
+      const ls = bracketStats(left, b);
+      const rs = bracketStats(right, b);
+      return {
+        rank: b.label,
+        [left.localized_name]: ls.picks ? Math.round((ls.wins / ls.picks) * 1000) / 10 : 0,
+        [right.localized_name]: rs.picks ? Math.round((rs.wins / rs.picks) * 1000) / 10 : 0,
+      };
+    });
+  }, [left, right]);
+
+  const { shared, victims } = useMemo(() => {
+    if (!leftMatchups || !rightMatchups) return { shared: [], victims: [] };
+    const rMap = new Map(rightMatchups.filter((m) => m.games_played >= 10).map((m) => [m.hero_id, m]));
+    const bad = [];
+    const good = [];
+    leftMatchups
+      .filter((m) => m.games_played >= 10)
+      .forEach((lm) => {
+        const rm = rMap.get(lm.hero_id);
+        if (!rm) return;
+        const lw = lm.wins / lm.games_played;
+        const rw = rm.wins / rm.games_played;
+        const enemy = heroById(lm.hero_id);
+        if (!enemy || enemy.id === left.id || enemy.id === right.id) return;
+        if (lw < 0.47 && rw < 0.47) bad.push({ enemy, lw, rw, avg: (lw + rw) / 2 });
+        if (lw > 0.53 && rw > 0.53) good.push({ enemy, lw, rw, avg: (lw + rw) / 2 });
+      });
+    bad.sort((a, b) => a.avg - b.avg);
+    good.sort((a, b) => b.avg - a.avg);
+    return { shared: bad.slice(0, 8), victims: good.slice(0, 8) };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [leftMatchups, rightMatchups, left, right, heroes]);
+
+  return (
+    <>
+      <div style={{ ...styles.panel, border: "1px solid #4A3D1E" }}>
+        <div style={styles.panelHeader}>
+          <Gem size={16} color="#E5B33D" />
+          <span style={{ ...styles.panelTitle, color: "#E5B33D" }}>Винрейт по рангам</span>
+        </div>
+        <div style={{ width: "100%", height: 240 }}>
+          <ResponsiveContainer>
+            <BarChart data={rankData} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#2A1A40" vertical={false} />
+              <XAxis dataKey="rank" tick={{ fill: "#9C8FB0", fontSize: 10 }} axisLine={{ stroke: "#2A1A40" }} tickLine={false} />
+              <YAxis domain={[0, 70]} tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={false} tickLine={false} unit="%" />
+              <Tooltip
+                contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 8, fontSize: 12 }}
+                labelStyle={{ color: "#F2EAFB" }}
+              />
+              <Bar dataKey={left.localized_name} fill="#B24BF3" radius={[3, 3, 0, 0]} />
+              <Bar dataKey={right.localized_name} fill="#E5B33D" radius={[3, 3, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+        <div style={styles.compareLegend}>
+          <span style={styles.legendItem}><span style={{ ...styles.legendLine, background: "#B24BF3" }} /> {left.localized_name}</span>
+          <span style={styles.legendItem}><span style={{ ...styles.legendLine, background: "#E5B33D" }} /> {right.localized_name}</span>
+        </div>
+      </div>
+
+      <div className="two-col" style={styles.twoCol}>
+        <div style={{ ...styles.panel, border: "1px solid #4A3D1E" }}>
+          <div style={styles.panelHeader}>
+            <TrendingDown size={16} color="#E2574C" />
+            <span style={{ ...styles.panelTitle, color: "#E2574C" }}>Общие проблемы</span>
+          </div>
+          {shared.length === 0 && <div style={styles.emptyState}>Общих сложных матчапов не нашлось.</div>}
+          {shared.map((s) => (
+            <div key={s.enemy.id} style={styles.roleRow}>
+              <HeroIcon hero={s.enemy} style={styles.matchupIcon} />
+              <span style={styles.matchupName}>{s.enemy.localized_name}</span>
+              <span style={{ ...styles.matchupPct, color: "#E2574C" }}>
+                {(s.lw * 100).toFixed(0)}% / {(s.rw * 100).toFixed(0)}%
+              </span>
+            </div>
+          ))}
+        </div>
+
+        <div style={{ ...styles.panel, border: "1px solid #4A3D1E" }}>
+          <div style={styles.panelHeader}>
+            <TrendingUp size={16} color="#5FCB8E" />
+            <span style={{ ...styles.panelTitle, color: "#5FCB8E" }}>Общие жертвы</span>
+          </div>
+          {victims.length === 0 && <div style={styles.emptyState}>Общих удобных матчапов не нашлось.</div>}
+          {victims.map((s) => (
+            <div key={s.enemy.id} style={styles.roleRow}>
+              <HeroIcon hero={s.enemy} style={styles.matchupIcon} />
+              <span style={styles.matchupName}>{s.enemy.localized_name}</span>
+              <span style={{ ...styles.matchupPct, color: "#5FCB8E" }}>
+                {(s.lw * 100).toFixed(0)}% / {(s.rw * 100).toFixed(0)}%
+              </span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -3880,6 +3966,7 @@ const styles = {
 
   /* compare */
   compareHeadRow: { display: "flex", alignItems: "center", gap: 12 },
+  compareLegend: { display: "flex", gap: 16, justifyContent: "center", fontSize: 11, color: "#9C8FB0", marginTop: 6, flexWrap: "wrap" },
   compareVs: {
     fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 18, color: "#6E5F86", flexShrink: 0,
   },
@@ -4106,8 +4193,8 @@ const styles = {
   itemRow: { display: "flex", alignItems: "center", gap: 8 },
   itemIcon: { width: 28, height: 21, borderRadius: 4, objectFit: "cover", flexShrink: 0, background: "#0E081A" },
   itemName: { fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
-  matchupName: { fontSize: 13, flex: 1 },
-  matchupPct: { fontSize: 12, fontWeight: 600 },
+  matchupName: { fontSize: 13, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  matchupPct: { fontSize: 13, fontWeight: 700, whiteSpace: "nowrap", flexShrink: 0, fontFamily: "'Rajdhani', sans-serif" },
   body: { maxWidth: 1040, margin: "0 auto", display: "flex", flexDirection: "column", gap: 20 },
   heroSelectWrap: { position: "relative", display: "flex", alignItems: "center", gap: 10 },
   heroSelectLabel: { fontSize: 13, color: "#9C8FB0" },
@@ -4118,7 +4205,7 @@ const styles = {
   heroSelectIcon: { width: 24, height: 24, borderRadius: 4 },
   heroSelectName: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 600, fontSize: 15 },
   dropdown: {
-    position: "absolute", top: "calc(100% + 6px)", left: 0, zIndex: 10, width: "min(280px, 90vw)", background: "#150C24",
+    position: "absolute", top: "calc(100% + 6px)", left: 0, zIndex: 45, width: "min(280px, 90vw)", background: "#150C24",
     border: "1px solid #2F1F49", borderRadius: 10, boxShadow: "0 12px 30px rgba(0,0,0,0.5)", overflow: "hidden",
   },
   dropdownSearch: { display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderBottom: "1px solid #2F1F49" },
@@ -4204,7 +4291,7 @@ const styles = {
     background: "#1A1508", border: "1px solid #4A3D1E", borderRadius: 8, padding: "6px 10px", lineHeight: 1.4,
   },
   roleRank: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 13, color: "#6E5F86", width: 14 },
-  rolePct: { fontSize: 12, fontWeight: 600, color: "#B24BF3", marginLeft: "auto" },
+  rolePct: { fontSize: 13, fontWeight: 700, color: "#B24BF3", marginLeft: "auto", whiteSpace: "nowrap", flexShrink: 0, fontFamily: "'Rajdhani', sans-serif" },
   draftToolbar: { display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" },
   poolToggle: { display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#9C8FB0", cursor: "pointer" },
   draftGrid: { display: "grid", gridTemplateColumns: "1fr 160px 1fr", gap: 16, alignItems: "start" },
