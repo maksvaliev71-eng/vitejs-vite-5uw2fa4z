@@ -347,9 +347,10 @@ async function getRuLocale() {
       }
     }
     if (!text) {
-      // surfaced in the console so a broken mirror is diagnosable instead of silently English
       console.warn("[DraftHex] русская локализация не загрузилась:\n" + tried.join("\n"));
-      throw new Error("no locale source");
+      const err = new Error("no locale source");
+      err.tried = tried;
+      throw err;
     }
 
     const kv = parseValveKV(text);
@@ -370,11 +371,42 @@ async function getRuLocale() {
     }
     return out;
   })();
+  // a rejected promise must not stay cached, otherwise retrying is impossible until reload
+  ruLocalePromise.catch(() => {
+    ruLocalePromise = null;
+  });
   return ruLocalePromise;
 }
 
+/* Official Russian names straight from Valve via our own backend. This covers items and
+   hero names reliably (no giant file, no third-party mirror). Ability texts still come from
+   the localization file, since Steam has no endpoint for them. */
+let steamRuPromise = null;
+
+async function getSteamRuNames() {
+  if (steamRuPromise) return steamRuPromise;
+  const cached = readLocalCache("dw_steam_ru");
+  if (cached) {
+    steamRuPromise = Promise.resolve(cached);
+    return cached;
+  }
+  steamRuPromise = (async () => {
+    const r = await fetch("/api/ru-names");
+    if (!r.ok) throw new Error("network");
+    const data = await r.json();
+    if (!data.items) throw new Error("bad payload");
+    writeLocalCache("dw_steam_ru", data);
+    return data;
+  })();
+  steamRuPromise.catch(() => {
+    steamRuPromise = null;
+  });
+  return steamRuPromise;
+}
+
 // dotaconstants keys items as "blink"; Valve keys them as "item_blink"
-function ruName(locale, key, isItem) {
+function ruName(locale, key, isItem, steamRu) {
+  if (isItem && steamRu && steamRu.items && steamRu.items[key]) return steamRu.items[key];
   if (!locale) return null;
   return locale[`n:${isItem ? `item_${key}` : key}`] || locale[`n:${key}`] || null;
 }
@@ -505,6 +537,77 @@ async function getLatestPatch() {
     return data;
   })();
   return latestPatchPromise;
+}
+
+/* Matchups from ordinary public games instead of the tiny pro sample. There is no simple
+   endpoint for this, so it goes through Explorer SQL: unnest the opposing team of every
+   public match the hero appears in and count wins per enemy. Heavier and slower than the
+   pro endpoint, hence the explicit toggle and long cache. */
+async function getPublicMatchups(heroId) {
+  const patch = await getLatestPatch();
+  const cacheKey = `dw_pubmatch_${heroId}_${patch.name}`;
+  const cached = readLocalCache(cacheKey, CACHE_TTL_MS * 4);
+  if (cached) return cached;
+
+  const sql = `
+    WITH mine AS (
+      SELECT
+        radiant_win,
+        ${heroId} = ANY(string_to_array(radiant_team, ',')::int[]) AS on_radiant,
+        CASE WHEN ${heroId} = ANY(string_to_array(radiant_team, ',')::int[])
+             THEN string_to_array(dire_team, ',')::int[]
+             ELSE string_to_array(radiant_team, ',')::int[] END AS enemies
+      FROM public_matches
+      WHERE start_time >= ${patch.ts}
+        AND (${heroId} = ANY(string_to_array(radiant_team, ',')::int[])
+          OR ${heroId} = ANY(string_to_array(dire_team, ',')::int[]))
+    )
+    SELECT
+      enemy AS hero_id,
+      COUNT(*) AS games_played,
+      SUM(CASE WHEN on_radiant = radiant_win THEN 1 ELSE 0 END) AS wins
+    FROM mine, unnest(enemies) AS enemy
+    GROUP BY enemy
+    HAVING COUNT(*) >= 50
+    ORDER BY enemy
+  `.replace(/\s+/g, " ").trim();
+
+  const r = await rateLimitedFetch(`https://api.opendota.com/api/explorer?sql=${encodeURIComponent(sql)}`);
+  if (!r.ok) throw new Error("network");
+  const json = await r.json();
+  if (!json.rows || json.rows.length === 0) throw new Error("no rows");
+  const data = json.rows.map((row) => ({
+    hero_id: Number(row.hero_id),
+    games_played: Number(row.games_played) || 0,
+    wins: Number(row.wins) || 0,
+  }));
+  try {
+    writeLocalCache(cacheKey, data);
+  } catch {
+    // quota — will be recomputed next time
+  }
+  return data;
+}
+
+function usePublicMatchups(heroId, enabled) {
+  const [state, setState] = useState({ loading: false, data: null, error: null });
+  useEffect(() => {
+    if (!heroId || !enabled) {
+      setState({ loading: false, data: null, error: null });
+      return;
+    }
+    let cancelled = false;
+    setState({ loading: true, data: null, error: null });
+    getPublicMatchups(heroId)
+      .then((data) => {
+        if (!cancelled) setState({ loading: false, data, error: null });
+      })
+      .catch(() => {
+        if (!cancelled) setState({ loading: false, data: null, error: "Не удалось посчитать по обычным матчам." });
+      });
+    return () => { cancelled = true; };
+  }, [heroId, enabled]);
+  return state;
 }
 
 async function getPatchWinRate(heroId) {
@@ -1688,14 +1791,14 @@ const ROLE_ORDER = ["Carry", "Support", "Nuker", "Disabler", "Initiator", "Durab
 
 const BRACKETS = [
   { key: "all", label: "Все ранги", minPicks: 200 },
-  { key: "1", label: "Herald", pickField: "1_pick", winField: "1_win", minPicks: 40 },
-  { key: "2", label: "Guardian", pickField: "2_pick", winField: "2_win", minPicks: 40 },
-  { key: "3", label: "Crusader", pickField: "3_pick", winField: "3_win", minPicks: 40 },
-  { key: "4", label: "Archon", pickField: "4_pick", winField: "4_win", minPicks: 40 },
-  { key: "5", label: "Legend", pickField: "5_pick", winField: "5_win", minPicks: 40 },
-  { key: "6", label: "Ancient", pickField: "6_pick", winField: "6_win", minPicks: 40 },
-  { key: "7", label: "Divine", pickField: "7_pick", winField: "7_win", minPicks: 40 },
-  { key: "8", label: "Immortal", pickField: "8_pick", winField: "8_win", minPicks: 40 },
+  { key: "1", label: "Рекрут", pickField: "1_pick", winField: "1_win", minPicks: 40 },
+  { key: "2", label: "Страж", pickField: "2_pick", winField: "2_win", minPicks: 40 },
+  { key: "3", label: "Рыцарь", pickField: "3_pick", winField: "3_win", minPicks: 40 },
+  { key: "4", label: "Герой", pickField: "4_pick", winField: "4_win", minPicks: 40 },
+  { key: "5", label: "Легенда", pickField: "5_pick", winField: "5_win", minPicks: 40 },
+  { key: "6", label: "Властелин", pickField: "6_pick", winField: "6_win", minPicks: 40 },
+  { key: "7", label: "Божество", pickField: "7_pick", winField: "7_win", minPicks: 40 },
+  { key: "8", label: "Титан", pickField: "8_pick", winField: "8_win", minPicks: 40 },
   { key: "pro", label: "Про-сцена", pickField: "pro_pick", winField: "pro_win", minPicks: 5 },
 ];
 
@@ -2343,11 +2446,19 @@ function CounterTableTab({ heroes, selected, selectedId, setSelectedId }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [heroQuery, setHeroQuery] = useState("");
   const [search, setSearch] = useState("");
-  const [minGames, setMinGames] = useState(30);
+  const [minGames, setMinGames] = useState(100);
   const [direction, setDirection] = useState("counters");
   const [sortDesc, setSortDesc] = useState(true);
+  const [source, setSource] = useState("public");
 
-  const { data: matchups, loading, error } = useMatchups(selectedId);
+  const pro = useMatchups(selectedId);
+  const pub = usePublicMatchups(selectedId, source === "public");
+
+  const usingPublic = source === "public";
+  const matchups = usingPublic ? pub.data : pro.data;
+  const loading = usingPublic ? pub.loading : pro.loading;
+  const error = usingPublic ? pub.error : pro.error;
+
   const heroById = (id) => heroes.find((h) => h.id === id);
 
   const rows = useMemo(() => {
@@ -2422,6 +2533,21 @@ function CounterTableTab({ heroes, selected, selectedId, setSelectedId }) {
         )}
       </div>
 
+      <div className="rank-scroll" style={styles.segment}>
+        <button
+          style={{ ...styles.segmentBtn, ...(source === "public" ? styles.segmentBtnActive : {}) }}
+          onClick={() => setSource("public")}
+        >
+          Обычные матчи
+        </button>
+        <button
+          style={{ ...styles.segmentBtn, ...(source === "pro" ? styles.segmentBtnActive : {}) }}
+          onClick={() => setSource("pro")}
+        >
+          Про-сцена
+        </button>
+      </div>
+
       <div className="toolbar" style={styles.toolbar}>
         <div style={styles.segment}>
           <button
@@ -2450,7 +2576,7 @@ function CounterTableTab({ heroes, selected, selectedId, setSelectedId }) {
           <label style={styles.gamesLabel}>
             Мин. игр: {minGames}
             <input
-              type="range" min="10" max="200" step="10" value={minGames}
+              type="range" min="10" max={source === "public" ? 2000 : 200} step={source === "public" ? 50 : 10} value={minGames}
               onChange={(e) => setMinGames(Number(e.target.value))}
               style={styles.slider}
             />
@@ -3257,27 +3383,39 @@ function ReferenceTab({ heroes }) {
     if (heroes.length && heroId == null) setHeroId(heroes[0].id);
   }, [heroes, heroId]);
 
-  // Russian pack is a large one-time download, so only fetch it when RU is actually selected
+  // Russian pack is a one-time download, fetched only when RU is actually selected
   useEffect(() => {
     if (lang !== "ru" || locale.data || locale.loading || locale.failed) return;
     let cancelled = false;
     setLocale((s) => ({ ...s, loading: true }));
     getRuLocale()
       .then((data) => {
-        if (!cancelled) setLocale({ loading: false, data, failed: false });
+        if (!cancelled) setLocale({ loading: false, data, failed: false, tried: null });
       })
-      .catch(() => {
-        if (!cancelled) setLocale({ loading: false, data: null, failed: true });
-        notify("Русская локализация не загрузилась — показываю оригинальные названия.");
+      .catch((e) => {
+        if (!cancelled) setLocale({ loading: false, data: null, failed: true, tried: e && e.tried });
       });
     return () => { cancelled = true; };
   }, [lang, locale.data, locale.loading, locale.failed]);
 
-  const ru = lang === "ru" ? locale.data : null;
+  const [steamRu, setSteamRu] = useState(null);
 
   useEffect(() => {
-    if (heroes.length && heroId == null) setHeroId(heroes[0].id);
-  }, [heroes, heroId]);
+    if (lang !== "ru" || steamRu) return;
+    let cancelled = false;
+    getSteamRuNames()
+      .then((d) => { if (!cancelled) setSteamRu(d); })
+      .catch(() => { /* backend not set up yet — fall back to the locale file */ });
+    return () => { cancelled = true; };
+  }, [lang, steamRu]);
+
+  function selectRu() {
+    setLang("ru");
+    // clear a previous failure so pressing RU actually retries
+    if (locale.failed) setLocale({ loading: false, data: null, failed: false, tried: null });
+  }
+
+  const ru = lang === "ru" ? locale.data : null;
 
   useEffect(() => {
     let cancelled = false;
@@ -3312,7 +3450,7 @@ function ReferenceTab({ heroes }) {
       .filter((i) => i.data && i.data.dname && i.data.cost)
       .filter((i) => {
         if (!q) return true;
-        const rn = ruName(ru, i.key, true);
+        const rn = ruName(ru, i.key, true, steamRu);
         return i.data.dname.toLowerCase().includes(q) || (rn ? rn.toLowerCase().includes(q) : false);
       })
       .sort((a, b) => (b.data.cost || 0) - (a.data.cost || 0))
@@ -3337,7 +3475,7 @@ function ReferenceTab({ heroes }) {
         <span style={styles.langDivider} />
         <button
           style={{ ...styles.segmentBtn, ...(lang === "ru" ? styles.segmentBtnActive : {}) }}
-          onClick={() => setLang("ru")}
+          onClick={selectRu}
         >
           RU
         </button>
@@ -3352,9 +3490,15 @@ function ReferenceTab({ heroes }) {
       {lang === "ru" && locale.loading && (
         <div style={{ ...styles.mutedText, fontSize: 12 }}>Загружаю русскую локализацию Valve (один раз, файл большой)…</div>
       )}
-      {lang === "ru" && locale.failed && (
-        <div style={{ ...styles.mutedText, fontSize: 12 }}>
-          Русская локализация недоступна — показываю оригинальные названия.
+      {lang === "ru" && locale.failed && !steamRu && (
+        <div style={styles.localeError}>
+          <div>Русская локализация не загрузилась — показаны оригинальные названия.</div>
+          {locale.tried && locale.tried.length > 0 && (
+            <div style={styles.localeTried}>
+              {locale.tried.map((t, i) => <div key={i}>{t}</div>)}
+            </div>
+          )}
+          <button style={{ ...styles.tourGo, marginTop: 8 }} onClick={selectRu}>Повторить</button>
         </div>
       )}
 
@@ -3385,8 +3529,8 @@ function ReferenceTab({ heroes }) {
                   />
                 )}
                 <div style={{ minWidth: 0 }}>
-                  <div style={styles.abilityName}>{ruName(ru, key, false) || data.dname}</div>
-                  {ruName(ru, key, false) && <div style={styles.origName}>{data.dname}</div>}
+                  <div style={styles.abilityName}>{ruName(ru, key, false, null) || data.dname}</div>
+                  {ruName(ru, key, false, null) && <div style={styles.origName}>{data.dname}</div>}
                   {(ruDesc(ru, key, false) || data.desc) && (
                     <div style={styles.abilityDesc}>{ruDesc(ru, key, false) || data.desc}</div>
                   )}
@@ -3428,10 +3572,10 @@ function ReferenceTab({ heroes }) {
                 )}
                 <div style={{ minWidth: 0 }}>
                   <div style={styles.abilityName}>
-                    {ruName(ru, key, true) || data.dname}
+                    {ruName(ru, key, true, steamRu) || data.dname}
                     <span style={styles.itemCost}>{data.cost} золота</span>
                   </div>
-                  {ruName(ru, key, true) && <div style={styles.origName}>{data.dname}</div>}
+                  {ruName(ru, key, true, steamRu) && <div style={styles.origName}>{data.dname}</div>}
                   {(ruDesc(ru, key, true) || data.desc || data.notes) && (
                     <div style={styles.abilityDesc}>{ruDesc(ru, key, true) || data.desc || data.notes}</div>
                   )}
@@ -4026,6 +4170,11 @@ const styles = {
     width: 4, height: 4, borderRadius: "50%", background: "#6E5F86", flexShrink: 0, marginTop: 7,
   },
   langDivider: { width: 1, background: "#2F1F49", margin: "2px 4px" },
+  localeError: {
+    background: "#1F1518", border: "1px solid #5A2430", borderRadius: 10, padding: 12,
+    fontSize: 12, color: "#F0D9DC",
+  },
+  localeTried: { marginTop: 6, fontSize: 10, color: "#B98A92", wordBreak: "break-all", lineHeight: 1.5 },
   origName: { fontSize: 11, color: "#6E5F86", marginBottom: 4 },
 
   /* premium */
