@@ -3132,9 +3132,6 @@ function HeroSynergyPanel({ accountId, matches, heroes }) {
           </span>
         </div>
       ))}
-
-      {state.status === "done" && (
-      )}
     </div>
   );
 }
