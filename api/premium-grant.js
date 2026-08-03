@@ -13,8 +13,9 @@
 //   { "secret": "<ADMIN_SECRET>", "steamid": "76561198...", "days": 30 }
 
 async function kvSet(key, value) {
-  const url = process.env.KV_REST_API_URL;
-  const token = process.env.KV_REST_API_TOKEN;
+  // Upstash-интеграция кладёт переменные под разными именами — поддерживаем оба
+  const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) throw new Error("KV не настроен");
 
   const r = await fetch(`${url}/set/${encodeURIComponent(key)}`, {
@@ -57,4 +58,3 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: String(e.message || e) });
   }
 }
-
