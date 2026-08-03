@@ -17,7 +17,7 @@ const ATTR = {
   str: { label: "Сила", color: "#E2574C" },
   agi: { label: "Ловкость", color: "#5FCB8E" },
   int: { label: "Интеллект", color: "#5B9FE0" },
-  all: { label: "Универсал", color: "#B24BF3" },
+  all: { label: "Универсал", color: "#C084FC" },
 };
 
 const ROLE_RU = {
@@ -339,46 +339,46 @@ let ruLocalePromise = null;
 
 async function getRuLocale() {
   if (ruLocalePromise) return ruLocalePromise;
-  const cached = readLocalCache("dw_ru_locale_v2");
+  const cached = readLocalCache("dw_ru_all_v1");
   if (cached) {
     ruLocalePromise = Promise.resolve(cached);
     return cached;
   }
   ruLocalePromise = (async () => {
-    // parsing happens on the server now — the browser only pulls a small cached JSON.
-    // A hard timeout keeps a slow first request from looking like an infinite spinner.
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 45000);
+    const timer = setTimeout(() => controller.abort(), 30000);
     let r;
     try {
-      r = await fetch("/api/ru-abilities", { signal: controller.signal });
+      r = await fetch("/api/ru-names", { signal: controller.signal });
     } catch (e) {
       clearTimeout(timer);
       const err = new Error("locale request failed");
-      err.tried = [e && e.name === "AbortError" ? "превышено время ожидания (45 с)" : "сеть недоступна"];
+      err.tried = [e && e.name === "AbortError" ? "превышено время ожидания" : "сеть недоступна"];
       throw err;
     }
     clearTimeout(timer);
-    if (!r.ok) {
-      let detail = `HTTP ${r.status}`;
-      try {
-        const j = await r.json();
-        if (j && j.tried) detail = j.tried.join(" | ");
-      } catch {
-        // keep the status code
-      }
+
+    const json = await r.json().catch(() => null);
+    if (!r.ok || !json) {
       const err = new Error("locale endpoint failed");
-      err.tried = [detail];
+      const detail = json && json.diagnostics ? Object.entries(json.diagnostics).map(([k, v]) => `${k}: ${v}`) : [`HTTP ${r.status}`];
+      err.tried = detail;
       throw err;
     }
-    const json = await r.json();
-    const out = json.strings || {};
+
+    const data = {
+      abilities: json.abilities || {},
+      items: json.items || {},
+      heroes: json.heroes || {},
+      counts: json.counts || {},
+      diagnostics: json.diagnostics || {},
+    };
     try {
-      writeLocalCache("dw_ru_locale_v2", out);
+      writeLocalCache("dw_ru_all_v1", data);
     } catch {
-      // quota — refetched next session, still fast thanks to the server cache
+      // quota — server still caches it
     }
-    return out;
+    return data;
   })();
   ruLocalePromise.catch(() => {
     ruLocalePromise = null;
@@ -386,41 +386,16 @@ async function getRuLocale() {
   return ruLocalePromise;
 }
 
-/* Official Russian names straight from Valve via our own backend. This covers items and
-   hero names reliably (no giant file, no third-party mirror). Ability texts still come from
-   the localization file, since Steam has no endpoint for them. */
-let steamRuPromise = null;
-
-async function getSteamRuNames() {
-  if (steamRuPromise) return steamRuPromise;
-  const cached = readLocalCache("dw_steam_ru");
-  if (cached) {
-    steamRuPromise = Promise.resolve(cached);
-    return cached;
-  }
-  steamRuPromise = (async () => {
-    const r = await fetch("/api/ru-names");
-    if (!r.ok) throw new Error("network");
-    const data = await r.json();
-    if (!data.items) throw new Error("bad payload");
-    writeLocalCache("dw_steam_ru", data);
-    return data;
-  })();
-  steamRuPromise.catch(() => {
-    steamRuPromise = null;
-  });
-  return steamRuPromise;
+function ruName(ru, key, isItem) {
+  if (!ru) return null;
+  if (isItem) return ru.items?.[key] || null;
+  return ru.abilities?.[`n:${key}`] || null;
 }
 
-// dotaconstants keys items as "blink"; Valve keys them as "item_blink"
-function ruName(locale, key, isItem, steamRu) {
-  if (isItem && steamRu && steamRu.items && steamRu.items[key]) return steamRu.items[key];
-  if (!locale) return null;
-  return locale[`n:${isItem ? `item_${key}` : key}`] || locale[`n:${key}`] || null;
-}
-function ruDesc(locale, key, isItem) {
-  if (!locale) return null;
-  return locale[`d:${isItem ? `item_${key}` : key}`] || locale[`d:${key}`] || null;
+function ruDesc(ru, key, isItem) {
+  if (!ru) return null;
+  if (isItem) return null; // STRATZ не отдаёт описания предметов отдельным полем
+  return ru.abilities?.[`d:${key}`] || null;
 }
 
 let abilitiesCatalogPromise = null;
@@ -690,7 +665,12 @@ async function fetchPlayerBundle(accountId) {
     fetch(`https://api.opendota.com/api/players/${accountId}`),
     fetch(`https://api.opendota.com/api/players/${accountId}/wl`),
     fetch(`https://api.opendota.com/api/players/${accountId}/heroes`),
-    fetch(`https://api.opendota.com/api/players/${accountId}/matches?limit=300`),
+    // gpm/xpm/last_hits/lane_role приходят только если запросить их явно
+    fetch(
+      `https://api.opendota.com/api/players/${accountId}/matches?limit=300` +
+        "&project=gold_per_min&project=xp_per_min&project=last_hits" +
+        "&project=lane_role&project=duration&project=hero_damage&project=tower_damage"
+    ),
     fetch(`https://api.opendota.com/api/players/${accountId}/peers`),
   ]);
   if (!profileRes.ok || !wlRes.ok || !heroesRes.ok || !matchesRes.ok) throw new Error("network");
@@ -893,6 +873,12 @@ export default function App() {
             scroll-behavior: auto !important;
           }
         }
+        .recharts-wrapper, .recharts-surface, .recharts-wrapper svg,
+        .recharts-sector, .recharts-rectangle, .recharts-layer, .recharts-pie {
+          outline: none !important;
+        }
+        .recharts-wrapper *:focus, .recharts-wrapper *:focus-visible { outline: none !important; }
+        .recharts-tooltip-wrapper { outline: none !important; }
         .home-text-col { text-align: left; }
         .rank-scroll { overflow-x: auto; scrollbar-width: none; }
         .rank-scroll::-webkit-scrollbar { display: none; }
@@ -924,7 +910,7 @@ export default function App() {
 
       {loading && (
         <div style={styles.centerMsg}>
-          <Loader2 className="spin" size={22} color="#B24BF3" />
+          <Loader2 className="spin" size={22} color="#C084FC" />
           <span style={{ marginLeft: 10 }}>Загружаю данные OpenDota…</span>
         </div>
       )}
@@ -1214,7 +1200,7 @@ function HomeTab({ heroes, setTab, onOpenHero }) {
         <DashCard
           title="Чаще всего берут"
           icon={Crown}
-          color="#B24BF3"
+          color="#C084FC"
           rows={topPicked.map((x) => ({
             hero: x.hero,
             value: x.picks > 1000 ? `${Math.round(x.picks / 1000)}k` : String(x.picks),
@@ -1386,8 +1372,8 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
           {monthlyTrend.length > 0 && (
             <div style={styles.panel}>
               <div style={styles.panelHeader}>
-                <BarChart3 size={16} color="#B24BF3" />
-                <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Винрейт по месяцам</span>
+                <BarChart3 size={16} color="#C084FC" />
+                <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Винрейт по месяцам</span>
               </div>
               <div style={{ width: "100%", height: 220 }}>
                 <ResponsiveContainer>
@@ -1396,11 +1382,13 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
                     <XAxis dataKey="label" tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={{ stroke: "#2A1A40" }} tickLine={false} />
                     <YAxis domain={[0, 100]} tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={false} tickLine={false} unit="%" />
                     <Tooltip
-                      contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 8, fontSize: 12 }}
+                      contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 10, fontSize: 12, padding: "8px 12px" }}
+                    itemStyle={{ color: "#F2EAFB" }}
+                    cursor={{ fill: "rgba(178,75,243,0.10)" }}
                       labelStyle={{ color: "#F2EAFB" }}
                       formatter={(value, name, props) => [`${value}% (${props.payload.games} игр)`, "Винрейт"]}
                     />
-                    <Line type="monotone" dataKey="winRate" stroke="#B24BF3" strokeWidth={2} dot={{ fill: "#B24BF3", r: 3 }} />
+                    <Line type="monotone" dataKey="winRate" stroke="#B24BF3" strokeWidth={2} dot={{ fill: "#C084FC", r: 3 }} />
                   </LineChart>
                 </ResponsiveContainer>
               </div>
@@ -1409,8 +1397,8 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
 
           <div style={styles.panel}>
             <div style={styles.panelHeader}>
-              <Crown size={16} color="#B24BF3" />
-              <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Топ героев по количеству игр</span>
+              <Crown size={16} color="#C084FC" />
+              <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Топ героев по количеству игр</span>
             </div>
             {topHeroes.length === 0 && <div style={styles.mutedText}>Недостаточно данных.</div>}
             {topHeroes.map((h) => (
@@ -1531,8 +1519,8 @@ function ProfileCharts({ matches, wl }) {
       <div className="two-col" style={styles.twoCol}>
         <div style={styles.panel}>
           <div style={styles.panelHeader}>
-            <BarChart3 size={16} color="#B24BF3" />
-            <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Победы и поражения</span>
+            <BarChart3 size={16} color="#C084FC" />
+            <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Победы и поражения</span>
           </div>
           {total > 0 ? (
             <div style={{ position: "relative", width: "100%", height: 200 }}>
@@ -1549,13 +1537,22 @@ function ProfileCharts({ matches, wl }) {
                     {pie.map((p) => <Cell key={p.name} fill={p.color} />)}
                   </Pie>
                   <Tooltip
-                    contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 8, fontSize: 12 }}
+                    contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 10, fontSize: 12, padding: "8px 12px" }}
+                    itemStyle={{ color: "#F2EAFB" }}
+                    cursor={false}
                   />
                 </PieChart>
               </ResponsiveContainer>
               <div style={styles.donutCenter}>
-                <div style={styles.donutValue}>{((wins / total) * 100).toFixed(1)}%</div>
-                <div style={{ ...styles.mutedText, fontSize: 11 }}>{wins}П / {losses}П</div>
+                <div
+                  style={{
+                    ...styles.donutValue,
+                    color: wins / total >= 0.5 ? "#5FCB8E" : "#E2574C",
+                  }}
+                >
+                  {((wins / total) * 100).toFixed(1)}%
+                </div>
+                <div style={styles.donutSub}>{wins} побед · {losses} поражений</div>
               </div>
             </div>
           ) : (
@@ -1565,8 +1562,8 @@ function ProfileCharts({ matches, wl }) {
 
         <div style={styles.panel}>
           <div style={styles.panelHeader}>
-            <Gem size={16} color="#B24BF3" />
-            <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Средние показатели</span>
+            <Gem size={16} color="#C084FC" />
+            <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Средние показатели</span>
           </div>
           <div style={styles.statsGrid}>
             <Stat label="KDA" value={stats.kda} />
@@ -1592,8 +1589,8 @@ function ProfileCharts({ matches, wl }) {
       <div className="two-col" style={styles.twoCol}>
         <div style={styles.panel}>
           <div style={styles.panelHeader}>
-            <BarChart3 size={16} color="#B24BF3" />
-            <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Винрейт по дням недели</span>
+            <BarChart3 size={16} color="#C084FC" />
+            <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Винрейт по дням недели</span>
           </div>
           {stats.weekday.length === 0 ? (
             <div style={styles.emptyState}>Мало данных.</div>
@@ -1605,7 +1602,9 @@ function ProfileCharts({ matches, wl }) {
                   <XAxis dataKey="day" tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={{ stroke: "#2A1A40" }} tickLine={false} />
                   <YAxis domain={[0, 100]} tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={false} tickLine={false} unit="%" />
                   <Tooltip
-                    contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 8, fontSize: 12 }}
+                    contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 10, fontSize: 12, padding: "8px 12px" }}
+                    itemStyle={{ color: "#F2EAFB" }}
+                    cursor={{ fill: "rgba(178,75,243,0.10)" }}
                     labelStyle={{ color: "#F2EAFB" }}
                     formatter={(v, n, p) => [`${v}% (${p.payload.games} игр)`, "Винрейт"]}
                   />
@@ -1622,8 +1621,8 @@ function ProfileCharts({ matches, wl }) {
 
         <div style={styles.panel}>
           <div style={styles.panelHeader}>
-            <BarChart3 size={16} color="#B24BF3" />
-            <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Винрейт по длине игры</span>
+            <BarChart3 size={16} color="#C084FC" />
+            <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Винрейт по длине игры</span>
           </div>
           {stats.duration.length === 0 ? (
             <div style={styles.emptyState}>Мало данных.</div>
@@ -1635,7 +1634,9 @@ function ProfileCharts({ matches, wl }) {
                   <XAxis dataKey="label" tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={{ stroke: "#2A1A40" }} tickLine={false} />
                   <YAxis domain={[0, 100]} tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={false} tickLine={false} unit="%" />
                   <Tooltip
-                    contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 8, fontSize: 12 }}
+                    contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 10, fontSize: 12, padding: "8px 12px" }}
+                    itemStyle={{ color: "#F2EAFB" }}
+                    cursor={{ fill: "rgba(178,75,243,0.10)" }}
                     labelStyle={{ color: "#F2EAFB" }}
                     formatter={(v, n, p) => [`${v}% (${p.payload.games} игр)`, "Винрейт"]}
                   />
@@ -1669,8 +1670,8 @@ function PeersPanel({ peers }) {
   return (
     <div style={styles.panel}>
       <div style={styles.panelHeader}>
-        <Handshake size={16} color="#B24BF3" />
-        <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Синергия с союзниками</span>
+        <Handshake size={16} color="#C084FC" />
+        <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Синергия с союзниками</span>
       </div>
       {top.map((p) => (
         <div key={p.account_id} style={styles.roleRow}>
@@ -1844,7 +1845,7 @@ function PatchWinRateBadge({ heroId }) {
 
   return (
     <div style={styles.patchBadge}>
-      <Sparkles size={14} color="#B24BF3" />
+      <Sparkles size={14} color="#C084FC" />
       {loading && <span style={styles.mutedText}>Считаю статистику с текущего патча…</span>}
       {!loading && data && (
         <span style={styles.mutedText}>
@@ -1871,8 +1872,8 @@ function HeroMonthlyTrendChart({ heroId }) {
   return (
     <div style={styles.panel}>
       <div style={styles.panelHeader}>
-        <BarChart3 size={16} color="#B24BF3" />
-        <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Тренд по месяцам (все игроки)</span>
+        <BarChart3 size={16} color="#C084FC" />
+        <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Тренд по месяцам (все игроки)</span>
       </div>
       {loading && <div style={styles.mutedText}>Считаю тренд…</div>}
       {!loading && !hasData && <div style={styles.mutedText}>Недостаточно данных за последние месяцы.</div>}
@@ -1884,11 +1885,13 @@ function HeroMonthlyTrendChart({ heroId }) {
               <XAxis dataKey="label" tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={{ stroke: "#2A1A40" }} tickLine={false} />
               <YAxis domain={[0, 100]} tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={false} tickLine={false} unit="%" />
               <Tooltip
-                contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 8, fontSize: 12 }}
+                contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 10, fontSize: 12, padding: "8px 12px" }}
+                    itemStyle={{ color: "#F2EAFB" }}
+                    cursor={{ fill: "rgba(178,75,243,0.10)" }}
                 labelStyle={{ color: "#F2EAFB" }}
                 formatter={(value, name, props) => [`${value}% (${props.payload.games} игр)`, "Винрейт"]}
               />
-              <Line type="monotone" dataKey="winRate" stroke="#B24BF3" strokeWidth={2} dot={{ fill: "#B24BF3", r: 3 }} />
+              <Line type="monotone" dataKey="winRate" stroke="#B24BF3" strokeWidth={2} dot={{ fill: "#C084FC", r: 3 }} />
             </LineChart>
           </ResponsiveContainer>
         </div>
@@ -1904,8 +1907,8 @@ function ItemsPanel({ heroId }) {
   return (
     <div style={styles.panel}>
       <div style={styles.panelHeader}>
-        <ShoppingBag size={16} color="#B24BF3" />
-        <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Популярные предметы</span>
+        <ShoppingBag size={16} color="#C084FC" />
+        <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Популярные предметы</span>
       </div>
       {loading && <SkeletonRows count={4} />}
       {error && <div style={styles.mutedText}>{error}</div>}
@@ -1975,8 +1978,8 @@ function LaneRoleChart({ heroId }) {
   return (
     <div style={styles.panel}>
       <div style={styles.panelHeader}>
-        <BarChart3 size={16} color="#B24BF3" />
-        <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Винрейт по линиям</span>
+        <BarChart3 size={16} color="#C084FC" />
+        <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Винрейт по линиям</span>
       </div>
       {loading && <SkeletonRows count={4} />}
       {error && <div style={styles.mutedText}>{error}</div>}
@@ -1991,7 +1994,9 @@ function LaneRoleChart({ heroId }) {
               <XAxis dataKey="lane" tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={{ stroke: "#2A1A40" }} tickLine={false} />
               <YAxis domain={[0, 100]} tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={false} tickLine={false} unit="%" />
               <Tooltip
-                contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 8, fontSize: 12 }}
+                contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 10, fontSize: 12, padding: "8px 12px" }}
+                    itemStyle={{ color: "#F2EAFB" }}
+                    cursor={{ fill: "rgba(178,75,243,0.10)" }}
                 labelStyle={{ color: "#F2EAFB" }}
                 formatter={(value, name, props) => [`${value}% (${props.payload.games} игр)`, "Винрейт"]}
               />
@@ -2453,7 +2458,7 @@ function DraftTab({ heroes, onOpenCard }) {
                     onClick={(e) => { e.stopPropagation(); togglePool(h.id); }}
                     title="В мой пул"
                   >
-                    <Star size={15} fill={pool.includes(h.id) ? "#B24BF3" : "none"} color="#B24BF3" />
+                    <Star size={15} fill={pool.includes(h.id) ? "#B24BF3" : "none"} color="#C084FC" />
                   </button>
                 </div>
               ))}
@@ -2531,7 +2536,7 @@ function GamePlanPanel({ title, color, plan, heroById, onOpenCard }) {
       )}
       {farm && (
         <PlanLine
-          icon={<Crown size={14} color="#B24BF3" />}
+          icon={<Crown size={14} color="#C084FC" />}
           label="Приоритет фарма"
           hero={farm.hero}
           note={`лучший проф. винрейт среди керри команды (${(farm.wr * 100).toFixed(0)}%)`}
@@ -2622,13 +2627,81 @@ function AiExplainButton() {
 function trustTier(coverage, total) {
   const ratio = total > 0 ? coverage / total : 0;
   if (ratio >= 0.8) return { emoji: "🟢", label: "высокое доверие", color: "#5FCB8E" };
-  if (ratio >= 0.4) return { emoji: "🟡", label: "среднее доверие", color: "#D9A441" };
+  if (ratio >= 0.4) return { emoji: "🟡", label: "среднее доверие", color: "#E5B33D" };
   return { emoji: "🔴", label: "низкое доверие", color: "#E2574C" };
 }
 
+const POSITION_LABELS = {
+  POSITION_1: "Позиция 1 — керри",
+  POSITION_2: "Позиция 2 — мид",
+  POSITION_3: "Позиция 3 — оффлейн",
+  POSITION_4: "Позиция 4 — саппорт",
+  POSITION_5: "Позиция 5 — хард-саппорт",
+};
+const POSITION_ORDER = ["POSITION_1", "POSITION_2", "POSITION_3", "POSITION_4", "POSITION_5"];
+const MIN_MATCHES_POSITION = 500;
+
+/* Real 1–5 positions come from STRATZ. OpenDota only has role tags (Carry/Support/...),
+   which a hero can carry several of at once, so they never told you where a hero is
+   actually played. */
+function usePositionStats() {
+  const [state, setState] = useState({ loading: true, rows: null, error: null, tried: null });
+
+  useEffect(() => {
+    let cancelled = false;
+    const cached = readLocalCache("dw_positions_v1");
+    if (cached) {
+      setState({ loading: false, rows: cached, error: null, tried: null });
+      return;
+    }
+    fetch("/api/stratz-positions")
+      .then(async (r) => {
+        const json = await r.json().catch(() => null);
+        if (!r.ok || !json || !json.rows) {
+          const detail = json && json.tried ? json.tried : [`HTTP ${r.status}`];
+          throw Object.assign(new Error("positions failed"), { tried: detail });
+        }
+        try {
+          writeLocalCache("dw_positions_v1", json.rows);
+        } catch {
+          // quota — server cache still helps
+        }
+        if (!cancelled) setState({ loading: false, rows: json.rows, error: null, tried: null });
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setState({ loading: false, rows: null, error: "Не удалось загрузить статистику по позициям", tried: e.tried });
+        }
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  return state;
+}
+
 function RolesTab({ heroes, onPick }) {
+  const [mode, setMode] = useState("positions");
   const [bracketKey, setBracketKey] = useState("all");
   const bracket = BRACKETS.find((b) => b.key === bracketKey);
+  const positions = usePositionStats();
+
+  const heroById = (id) => heroes.find((h) => h.id === id);
+
+  const byPosition = useMemo(() => {
+    const map = {};
+    POSITION_ORDER.forEach((pos) => (map[pos] = []));
+    (positions.rows || []).forEach((row) => {
+      const bucket = map[row.position];
+      if (!bucket) return;
+      if (!row.matchCount || row.matchCount < MIN_MATCHES_POSITION) return;
+      const hero = heroById(row.heroId);
+      if (!hero) return;
+      bucket.push({ hero, winRate: row.winCount / row.matchCount, matches: row.matchCount });
+    });
+    Object.keys(map).forEach((pos) => map[pos].sort((a, b) => b.winRate - a.winRate));
+    return map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [positions.rows, heroes]);
 
   const byRole = useMemo(() => {
     const map = {};
@@ -2648,41 +2721,111 @@ function RolesTab({ heroes, onPick }) {
   return (
     <div style={styles.body}>
       <div style={styles.segment}>
-        {BRACKETS.map((b) => (
-          <button
-            key={b.key}
-            style={{ ...styles.segmentBtn, ...(bracketKey === b.key ? styles.segmentBtnActive : {}) }}
-            onClick={() => setBracketKey(b.key)}
-          >
-            {b.label}
-          </button>
-        ))}
+        <button
+          style={{ ...styles.segmentBtn, ...(mode === "positions" ? styles.segmentBtnActive : {}) }}
+          onClick={() => setMode("positions")}
+        >
+          Позиции 1–5
+        </button>
+        <button
+          style={{ ...styles.segmentBtn, ...(mode === "roles" ? styles.segmentBtnActive : {}) }}
+          onClick={() => setMode("roles")}
+        >
+          По ролям и рангам
+        </button>
       </div>
 
-      {bracketKey === "pro" && <TopBansPanel heroes={heroes} onPick={onPick} />}
-
-      <div style={styles.roleGrid}>
-        {ROLE_ORDER.map((role) => {
-          const list = byRole[role].slice(0, 5);
-          return (
-            <div key={role} style={styles.panel}>
-              <div style={styles.panelHeader}>
-                <Crown size={16} color="#B24BF3" />
-                <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>{ROLE_RU[role] || role}</span>
-              </div>
-              {list.length === 0 && <div style={styles.emptyState}>Недостаточно данных для этого ранга.</div>}
-              {list.map(({ hero, winRate }, i) => (
-                <div key={hero.id} className="role-row" style={styles.roleRow} onClick={() => onPick(hero.id)}>
-                  <span style={styles.roleRank}>{i + 1}</span>
-                  <HeroIcon hero={hero} style={styles.matchupIcon} />
-                  <span style={styles.matchupName}>{hero.localized_name}</span>
-                  <span style={styles.rolePct}>{(winRate * 100).toFixed(1)}%</span>
-                </div>
+      {mode === "positions" && (
+        <>
+          {positions.loading && (
+            <div style={styles.roleGrid}>
+              {POSITION_ORDER.map((pos) => (
+                <div key={pos} style={styles.panel}><SkeletonRows count={5} /></div>
               ))}
             </div>
-          );
-        })}
-      </div>
+          )}
+
+          {positions.error && (
+            <div style={styles.localeError}>
+              <div>{positions.error}</div>
+              {positions.tried && (
+                <div style={styles.localeTried}>
+                  {positions.tried.map((t, i) => <div key={i}>{t}</div>)}
+                </div>
+              )}
+            </div>
+          )}
+
+          {!positions.loading && !positions.error && (
+            <div style={styles.roleGrid}>
+              {POSITION_ORDER.map((pos) => {
+                const list = byPosition[pos].slice(0, 5);
+                return (
+                  <div key={pos} style={styles.panel}>
+                    <div style={styles.panelHeader}>
+                      <Crown size={16} color="#C084FC" />
+                      <span style={{ ...styles.panelTitle, color: "#C084FC" }}>{POSITION_LABELS[pos]}</span>
+                    </div>
+                    {list.length === 0 && <div style={styles.emptyState}>Недостаточно данных.</div>}
+                    {list.map(({ hero, winRate, matches }, i) => (
+                      <div key={hero.id} className="role-row" style={styles.roleRow} onClick={() => onPick(hero.id)}>
+                        <span style={styles.roleRank}>{i + 1}</span>
+                        <HeroIcon hero={hero} style={styles.matchupIcon} />
+                        <span style={styles.matchupName}>{hero.localized_name}</span>
+                        <span style={{ ...styles.mutedText, fontSize: 11 }}>
+                          {matches > 1000 ? `${Math.round(matches / 1000)}k` : matches}
+                        </span>
+                        <span style={styles.rolePct}>{(winRate * 100).toFixed(1)}%</span>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
+
+      {mode === "roles" && (
+        <>
+          <div className="rank-scroll" style={styles.segment}>
+            {BRACKETS.map((b) => (
+              <button
+                key={b.key}
+                style={{ ...styles.segmentBtn, ...(bracketKey === b.key ? styles.segmentBtnActive : {}) }}
+                onClick={() => setBracketKey(b.key)}
+              >
+                {b.label}
+              </button>
+            ))}
+          </div>
+
+          {bracketKey === "pro" && <TopBansPanel heroes={heroes} onPick={onPick} />}
+
+          <div style={styles.roleGrid}>
+            {ROLE_ORDER.map((role) => {
+              const list = byRole[role].slice(0, 5);
+              return (
+                <div key={role} style={styles.panel}>
+                  <div style={styles.panelHeader}>
+                    <Crown size={16} color="#C084FC" />
+                    <span style={{ ...styles.panelTitle, color: "#C084FC" }}>{ROLE_RU[role] || role}</span>
+                  </div>
+                  {list.length === 0 && <div style={styles.emptyState}>Недостаточно данных для этого ранга.</div>}
+                  {list.map(({ hero, winRate }, i) => (
+                    <div key={hero.id} className="role-row" style={styles.roleRow} onClick={() => onPick(hero.id)}>
+                      <span style={styles.roleRank}>{i + 1}</span>
+                      <HeroIcon hero={hero} style={styles.matchupIcon} />
+                      <span style={styles.matchupName}>{hero.localized_name}</span>
+                      <span style={styles.rolePct}>{(winRate * 100).toFixed(1)}%</span>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -3204,7 +3347,7 @@ function CounterWebTab({ heroes, onPick }) {
 
       {buildProgress && (
         <div style={styles.progressBox}>
-          <Loader2 className="spin" size={16} color="#B24BF3" />
+          <Loader2 className="spin" size={16} color="#C084FC" />
           <span>Строю граф: {buildProgress.done} / {buildProgress.total} героев</span>
           <div style={styles.progressTrack}>
             <div style={{ ...styles.progressFill, width: `${(buildProgress.done / buildProgress.total) * 100}%` }} />
@@ -3640,7 +3783,9 @@ function PremiumProfilePanels({ matches, accountId, heroes }) {
                 <XAxis dataKey="idx" tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={{ stroke: "#2A1A40" }} tickLine={false} />
                 <YAxis tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={false} tickLine={false} />
                 <Tooltip
-                  contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 8, fontSize: 12 }}
+                  contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 10, fontSize: 12, padding: "8px 12px" }}
+                    itemStyle={{ color: "#F2EAFB" }}
+                    cursor={{ fill: "rgba(178,75,243,0.10)" }}
                   labelStyle={{ color: "#F2EAFB" }}
                   labelFormatter={(v) => `Матч ${v}`}
                 />
@@ -3687,17 +3832,6 @@ function ReferenceTab({ heroes }) {
     return () => { cancelled = true; };
   }, [lang, locale.data, locale.loading, locale.failed]);
 
-  const [steamRu, setSteamRu] = useState(null);
-
-  useEffect(() => {
-    if (lang !== "ru" || steamRu) return;
-    let cancelled = false;
-    getSteamRuNames()
-      .then((d) => { if (!cancelled) setSteamRu(d); })
-      .catch(() => { /* backend not set up yet — fall back to the locale file */ });
-    return () => { cancelled = true; };
-  }, [lang, steamRu]);
-
   function selectRu() {
     setLang("ru");
     // clear a previous failure so pressing RU actually retries
@@ -3739,7 +3873,7 @@ function ReferenceTab({ heroes }) {
       .filter((i) => i.data && i.data.dname && i.data.cost)
       .filter((i) => {
         if (!q) return true;
-        const rn = ruName(ru, i.key, true, steamRu);
+        const rn = ruName(ru, i.key, true);
         return i.data.dname.toLowerCase().includes(q) || (rn ? rn.toLowerCase().includes(q) : false);
       })
       .sort((a, b) => (b.data.cost || 0) - (a.data.cost || 0))
@@ -3780,22 +3914,27 @@ function ReferenceTab({ heroes }) {
         <div style={locale.failed ? styles.localeError : styles.localeStatus}>
           <div>
             {locale.loading && "Загружаю русскую локализацию…"}
-            {!locale.loading && locale.data &&
-              `Способности: загружено ${Object.keys(locale.data).length} строк`}
+            {!locale.loading && locale.data && "Русская локализация загружена"}
             {!locale.loading && !locale.data && !locale.failed && "Локализация не запрашивалась"}
             {locale.failed && "Способности: не загрузились, показаны оригинальные названия"}
           </div>
-          <div style={{ marginTop: 4 }}>
-            {steamRu
-              ? `Предметы и герои: загружено ${Object.keys(steamRu.items || {}).length} названий`
-              : "Предметы и герои: не загрузились (проверь /api/ru-names)"}
-          </div>
+          {locale.data && locale.data.counts && (
+            <div style={{ marginTop: 4 }}>
+              Предметы: {locale.data.counts.items || 0} · Герои: {locale.data.counts.heroes || 0} ·
+              Способности: {locale.data.counts.abilities || 0}
+            </div>
+          )}
+          {locale.data && locale.data.diagnostics && Object.keys(locale.data.diagnostics).length > 0 && (
+            <div style={styles.localeTried}>
+              {Object.entries(locale.data.diagnostics).map(([k, v]) => <div key={k}>{k}: {v}</div>)}
+            </div>
+          )}
           {locale.tried && locale.tried.length > 0 && (
             <div style={styles.localeTried}>
               {locale.tried.map((t, i) => <div key={i}>{t}</div>)}
             </div>
           )}
-          {(locale.failed || !steamRu) && (
+          {locale.failed && (
             <button style={{ ...styles.tourGo, marginTop: 8 }} onClick={selectRu}>Повторить</button>
           )}
         </div>
@@ -3813,8 +3952,8 @@ function ReferenceTab({ heroes }) {
 
           <div style={styles.panel}>
             <div style={styles.panelHeader}>
-              <BookOpen size={16} color="#B24BF3" />
-              <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Способности {hero.localized_name}</span>
+              <BookOpen size={16} color="#C084FC" />
+              <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Способности {hero.localized_name}</span>
             </div>
             {heroAbilityList.length === 0 && <div style={styles.emptyState}>Нет данных по способностям этого героя.</div>}
             {heroAbilityList.map(({ key, data }) => (
@@ -3828,8 +3967,8 @@ function ReferenceTab({ heroes }) {
                   />
                 )}
                 <div style={{ minWidth: 0 }}>
-                  <div style={styles.abilityName}>{ruName(ru, key, false, null) || data.dname}</div>
-                  {ruName(ru, key, false, null) && <div style={styles.origName}>{data.dname}</div>}
+                  <div style={styles.abilityName}>{ruName(ru, key, false) || data.dname}</div>
+                  {ruName(ru, key, false) && <div style={styles.origName}>{data.dname}</div>}
                   {(ruDesc(ru, key, false) || data.desc) && (
                     <div style={styles.abilityDesc}>{ruDesc(ru, key, false) || data.desc}</div>
                   )}
@@ -3855,8 +3994,8 @@ function ReferenceTab({ heroes }) {
 
           <div style={styles.panel}>
             <div style={styles.panelHeader}>
-              <ShoppingBag size={16} color="#B24BF3" />
-              <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Предметы</span>
+              <ShoppingBag size={16} color="#C084FC" />
+              <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Предметы</span>
             </div>
             {itemList.length === 0 && <div style={styles.emptyState}>Ничего не нашлось.</div>}
             {itemList.map(({ key, data }) => (
@@ -3871,10 +4010,10 @@ function ReferenceTab({ heroes }) {
                 )}
                 <div style={{ minWidth: 0 }}>
                   <div style={styles.abilityName}>
-                    {ruName(ru, key, true, steamRu) || data.dname}
+                    {ruName(ru, key, true) || data.dname}
                     <span style={styles.itemCost}>{data.cost} золота</span>
                   </div>
-                  {ruName(ru, key, true, steamRu) && <div style={styles.origName}>{data.dname}</div>}
+                  {ruName(ru, key, true) && <div style={styles.origName}>{data.dname}</div>}
                   {(ruDesc(ru, key, true) || data.desc || data.notes) && (
                     <div style={styles.abilityDesc}>{ruDesc(ru, key, true) || data.desc || data.notes}</div>
                   )}
@@ -3925,8 +4064,8 @@ function PatchesTab() {
     <div style={styles.body}>
       <div style={styles.panel}>
         <div style={styles.panelHeader}>
-          <History size={16} color="#B24BF3" />
-          <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>История патчей</span>
+          <History size={16} color="#C084FC" />
+          <span style={{ ...styles.panelTitle, color: "#C084FC" }}>История патчей</span>
         </div>
         {state.loading && <SkeletonRows count={6} />}
         {state.error && <div style={styles.emptyState}>{state.error}</div>}
@@ -4147,8 +4286,8 @@ function CompareTab({ heroes }) {
 
       <div style={styles.panel}>
         <div style={styles.panelHeader}>
-          <Swords size={16} color="#B24BF3" />
-          <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Прямой матчап</span>
+          <Swords size={16} color="#C084FC" />
+          <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Прямой матчап</span>
         </div>
         {leftLoading && <SkeletonRows count={1} />}
         {!leftLoading && !headToHead && (
@@ -4176,8 +4315,8 @@ function CompareTab({ heroes }) {
 
       <div style={styles.panel}>
         <div style={styles.panelHeader}>
-          <BarChart3 size={16} color="#B24BF3" />
-          <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Характеристики</span>
+          <BarChart3 size={16} color="#C084FC" />
+          <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Характеристики</span>
         </div>
         {rows.map((row) => {
           const lWins = row.l != null && row.r != null && row.l !== row.r && (row.higher ? row.l > row.r : row.l < row.r);
@@ -4266,7 +4405,9 @@ function DeepComparePanels({ left, right, leftMatchups, rightMatchups, heroes })
               <XAxis dataKey="rank" tick={{ fill: "#9C8FB0", fontSize: 10 }} axisLine={{ stroke: "#2A1A40" }} tickLine={false} />
               <YAxis domain={[0, 70]} tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={false} tickLine={false} unit="%" />
               <Tooltip
-                contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 8, fontSize: 12 }}
+                contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 10, fontSize: 12, padding: "8px 12px" }}
+                    itemStyle={{ color: "#F2EAFB" }}
+                    cursor={{ fill: "rgba(178,75,243,0.10)" }}
                 labelStyle={{ color: "#F2EAFB" }}
               />
               <Bar dataKey={left.localized_name} fill="#B24BF3" radius={[3, 3, 0, 0]} />
@@ -4377,12 +4518,20 @@ function ComparePicker({ heroes, selectedId, onSelect, align }) {
   );
 }
 
+/* Единая шкала цвета текста — на все страницы:
+   #F2EAFB  заголовки, значения, важные числа
+   #C4B8D8  основной текст, описания
+   #9C8FB0  подписи, второстепенное
+   #C084FC  акцент (заголовки разделов, иконки)
+   #5FCB8E / #E2574C  положительное / отрицательное
+   #E5B33D  премиум
+   Цвета атрибутов героев (ATTR) — отдельная смысловая шкала, к тексту не относится. */
 const styles = {
   /* toast */
   toast: {
     position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)", zIndex: 200,
     display: "flex", alignItems: "center", gap: 10, background: "#1B0F1A", border: "1px solid #5A2430",
-    color: "#F0D9DC", borderRadius: 10, padding: "11px 14px", fontSize: 13,
+    color: "#F2EAFB", borderRadius: 10, padding: "11px 14px", fontSize: 13,
     boxShadow: "0 12px 30px rgba(0,0,0,0.55)", maxWidth: "min(420px, calc(100vw - 32px))",
     animation: "toastIn 0.2s ease-out",
   },
@@ -4400,7 +4549,7 @@ const styles = {
   },
   tourClose: {
     position: "absolute", top: 12, right: 12, background: "transparent", border: "none",
-    color: "#6E5F86", cursor: "pointer", display: "flex", padding: 4,
+    color: "#9C8FB0", cursor: "pointer", display: "flex", padding: 4,
   },
   tourIconBadge: {
     width: 52, height: 52, borderRadius: 14, margin: "0 auto 14px",
@@ -4409,13 +4558,13 @@ const styles = {
     border: "1px solid #3A2857",
   },
   tourTitle: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 20, marginBottom: 8 },
-  tourText: { fontSize: 13, color: "#C9BEDD", lineHeight: 1.55 },
+  tourText: { fontSize: 13, color: "#C4B8D8", lineHeight: 1.55 },
   tourDots: { display: "flex", gap: 6, justifyContent: "center", margin: "18px 0 16px" },
   tourDot: { width: 7, height: 7, borderRadius: "50%" },
   tourBtnRow: { display: "flex", alignItems: "center", justifyContent: "center", gap: 10, flexWrap: "wrap" },
-  tourSkip: { background: "transparent", border: "none", color: "#6E5F86", fontSize: 12, cursor: "pointer" },
+  tourSkip: { background: "transparent", border: "none", color: "#9C8FB0", fontSize: 12, cursor: "pointer" },
   tourGo: {
-    background: "transparent", border: "1px solid #3A2857", color: "#C9BEDD", fontSize: 12,
+    background: "transparent", border: "1px solid #3A2857", color: "#C4B8D8", fontSize: 12,
     padding: "9px 14px", borderRadius: 999, cursor: "pointer",
   },
 
@@ -4423,7 +4572,7 @@ const styles = {
   compareHeadRow: { display: "flex", alignItems: "center", gap: 12 },
   compareLegend: { display: "flex", gap: 16, justifyContent: "center", fontSize: 11, color: "#9C8FB0", marginTop: 6, flexWrap: "wrap" },
   compareVs: {
-    fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 18, color: "#6E5F86", flexShrink: 0,
+    fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 18, color: "#9C8FB0", flexShrink: 0,
   },
   compareCard: {
     width: "100%", display: "flex", flexDirection: "column", gap: 8, padding: 16,
@@ -4449,7 +4598,7 @@ const styles = {
   itemIconLg: { width: 48, height: 36, borderRadius: 6, objectFit: "cover", flexShrink: 0, background: "#0E081A" },
   abilityName: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 15, marginBottom: 4 },
   abilityDesc: { fontSize: 12, color: "#9C8FB0", lineHeight: 1.5 },
-  abilityMeta: { fontSize: 11, color: "#6E5F86", marginTop: 4 },
+  abilityMeta: { fontSize: 11, color: "#9C8FB0", marginTop: 4 },
   itemCost: { fontSize: 11, color: "#E5B33D", fontWeight: 600, marginLeft: 6 },
 
   /* patches */
@@ -4464,7 +4613,7 @@ const styles = {
     fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 13, color: "#C084FC",
     marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.03em",
   },
-  patchLine: { display: "flex", gap: 8, fontSize: 12, color: "#C9BEDD", lineHeight: 1.5, padding: "2px 0" },
+  patchLine: { display: "flex", gap: 8, fontSize: 12, color: "#C4B8D8", lineHeight: 1.5, padding: "2px 0" },
   patchBullet: {
     width: 4, height: 4, borderRadius: "50%", background: "#6E5F86", flexShrink: 0, marginTop: 7,
   },
@@ -4475,10 +4624,10 @@ const styles = {
   },
   localeError: {
     background: "#1F1518", border: "1px solid #5A2430", borderRadius: 10, padding: 12,
-    fontSize: 12, color: "#F0D9DC",
+    fontSize: 12, color: "#F2EAFB",
   },
-  localeTried: { marginTop: 6, fontSize: 10, color: "#B98A92", wordBreak: "break-all", lineHeight: 1.5 },
-  origName: { fontSize: 11, color: "#6E5F86", marginBottom: 4 },
+  localeTried: { marginTop: 6, fontSize: 10, color: "#C4B8D8", wordBreak: "break-all", lineHeight: 1.5 },
+  origName: { fontSize: 11, color: "#9C8FB0", marginBottom: 4 },
 
   /* premium */
   premiumLockCard: {
@@ -4489,14 +4638,14 @@ const styles = {
   savedDraftRow: { display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: "1px solid #241636" },
   savedDraftIcons: { display: "flex", alignItems: "center", gap: 3, flex: 1, flexWrap: "wrap", minWidth: 0 },
   savedDraftIcon: { width: 20, height: 20, borderRadius: 4 },
-  savedVs: { fontSize: 10, color: "#6E5F86", margin: "0 4px" },
+  savedVs: { fontSize: 10, color: "#9C8FB0", margin: "0 4px" },
 
   /* patches (legacy row, kept for spacing) */
   patchRow: { display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: "1px solid #241636" },
   patchDot: { width: 8, height: 8, borderRadius: "50%", flexShrink: 0 },
   patchName: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 14 },
   patchCurrent: {
-    fontSize: 9, color: "#B24BF3", border: "1px solid #B24BF3", borderRadius: 999,
+    fontSize: 9, color: "#C084FC", border: "1px solid #B24BF3", borderRadius: 999,
     padding: "1px 7px", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em",
   },
   patchDate: { marginLeft: "auto", fontSize: 12, color: "#9C8FB0" },
@@ -4561,7 +4710,7 @@ const styles = {
   menuItemActive: { background: "#2C1C42", color: "#F2EAFB" },
 
   centerMsg: { display: "flex", alignItems: "center", justifyContent: "center", padding: "60px 0", color: "#9C8FB0" },
-  errorBox: { background: "#1F1518", border: "1px solid #E2574C", color: "#F0B6AF", borderRadius: 8, padding: 16 },
+  errorBox: { background: "#1F1518", border: "1px solid #E2574C", color: "#F2EAFB", borderRadius: 8, padding: 16 },
 
   homeWrap: { maxWidth: 1040, margin: "0 auto", display: "flex", flexDirection: "column", gap: 32 },
   homeHero: {
@@ -4593,7 +4742,7 @@ const styles = {
     WebkitBackgroundClip: "text", backgroundClip: "text", color: "transparent",
     textShadow: "0 0 40px rgba(178,75,243,0.4)",
   },
-  homeTagline: { maxWidth: 480, fontSize: 15, color: "#C9BEDD", lineHeight: 1.6, marginTop: 14 },
+  homeTagline: { maxWidth: 480, fontSize: 15, color: "#C4B8D8", lineHeight: 1.6, marginTop: 14 },
   homeCta: {
     display: "flex", alignItems: "center", gap: 8, marginTop: 20,
     background: "linear-gradient(135deg, #C084FC, #6D28D9)", border: "none", color: "#fff",
@@ -4615,12 +4764,12 @@ const styles = {
   },
   patchChip: {
     display: "inline-flex", alignItems: "center", gap: 6, marginTop: 14, fontSize: 12,
-    color: "#C9BEDD", background: "#0E081A", border: "1px solid #2C1C42", borderRadius: 999,
+    color: "#C4B8D8", background: "#0E081A", border: "1px solid #2C1C42", borderRadius: 999,
     padding: "6px 12px",
   },
   homeActions: { display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" },
   homeSecondary: {
-    background: "transparent", border: "1px solid #3A2857", color: "#C9BEDD",
+    background: "transparent", border: "1px solid #3A2857", color: "#C4B8D8",
     fontSize: 13, padding: "11px 18px", borderRadius: 999, cursor: "pointer",
   },
   homeCard: {
@@ -4738,7 +4887,7 @@ const styles = {
   scoreBarFill: { height: "100%", borderRadius: 3 },
   scoreNum: { fontSize: 12, fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, width: 24, textAlign: "right" },
   emptyState: {
-    padding: "26px 14px", textAlign: "center", color: "#6E5F86", fontSize: 13,
+    padding: "26px 14px", textAlign: "center", color: "#9C8FB0", fontSize: 13,
     border: "1px dashed #2A1A40", borderRadius: 10, margin: "4px 0",
   },
   methodNote: { display: "flex", gap: 8, fontSize: 12, color: "#9C8FB0", background: "#0E081A", border: "1px solid #2A1A40", borderRadius: 8, padding: 12 },
@@ -4759,7 +4908,11 @@ const styles = {
     position: "absolute", inset: 0, display: "flex", flexDirection: "column",
     alignItems: "center", justifyContent: "center", pointerEvents: "none",
   },
-  donutValue: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 26, color: "#F2EAFB" },
+  donutValue: {
+    fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 30, letterSpacing: "0.01em",
+    lineHeight: 1.1,
+  },
+  donutSub: { fontSize: 11, color: "#9C8FB0", marginTop: 2 },
   streakRow: { display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 },
   streakChip: {
     fontSize: 11, padding: "5px 11px", borderRadius: 999, border: "1px solid", fontWeight: 600,
@@ -4776,18 +4929,18 @@ const styles = {
   },
   premiumBtn: {
     display: "flex", alignItems: "center", gap: 5, marginLeft: 30, marginTop: 6, background: "transparent",
-    border: "1px solid #4A3D1E", color: "#C9BEDD", fontSize: 11, padding: "4px 9px", borderRadius: 999, cursor: "pointer",
+    border: "1px solid #4A3D1E", color: "#C4B8D8", fontSize: 11, padding: "4px 9px", borderRadius: 999, cursor: "pointer",
   },
   premiumTag: {
     fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 9, letterSpacing: "0.05em",
     color: "#E5B33D", marginLeft: 2,
   },
   premiumTeaser: {
-    display: "flex", alignItems: "center", gap: 6, marginLeft: 30, marginTop: 6, fontSize: 11, color: "#C9BEDD",
+    display: "flex", alignItems: "center", gap: 6, marginLeft: 30, marginTop: 6, fontSize: 11, color: "#C4B8D8",
     background: "#1A1508", border: "1px solid #4A3D1E", borderRadius: 8, padding: "6px 10px", lineHeight: 1.4,
   },
-  roleRank: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 13, color: "#6E5F86", width: 14 },
-  rolePct: { fontSize: 13, fontWeight: 700, color: "#B24BF3", marginLeft: "auto", whiteSpace: "nowrap", flexShrink: 0, fontFamily: "'Rajdhani', sans-serif" },
+  roleRank: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 13, color: "#9C8FB0", width: 14 },
+  rolePct: { fontSize: 13, fontWeight: 700, color: "#C084FC", marginLeft: "auto", whiteSpace: "nowrap", flexShrink: 0, fontFamily: "'Rajdhani', sans-serif" },
   draftToolbar: { display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" },
   poolToggle: { display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#9C8FB0", cursor: "pointer" },
   draftGrid: { display: "grid", gridTemplateColumns: "1fr 160px 1fr", gap: 16, alignItems: "start" },
@@ -4796,19 +4949,19 @@ const styles = {
     background: "#0E081A", border: "1px solid #2A1A40", borderRadius: 12, padding: "20px 14px",
     textAlign: "center", boxShadow: "0 0 30px rgba(109,40,217,0.12)", width: "100%",
   },
-  vsPct: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 32, color: "#B24BF3" },
+  vsPct: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 32, color: "#C084FC" },
   slotRow: { display: "flex", alignItems: "center", gap: 8, padding: "6px 0", minHeight: 32 },
-  slotPos: { fontSize: 10, color: "#6E5F86", width: 62, flexShrink: 0, textTransform: "uppercase", letterSpacing: "0.03em" },
+  slotPos: { fontSize: 10, color: "#9C8FB0", width: 62, flexShrink: 0, textTransform: "uppercase", letterSpacing: "0.03em" },
   planLine: { padding: "10px 0", borderBottom: "1px solid #241636" },
   planLineHeader: { display: "flex", alignItems: "center", gap: 6, marginBottom: 6 },
   planLineLabel: { fontSize: 11, color: "#9C8FB0", textTransform: "uppercase", letterSpacing: "0.03em" },
   planLineRow: { display: "flex", alignItems: "center", gap: 8, cursor: "pointer" },
-  planLineNote: { fontSize: 11, color: "#6E5F86", marginTop: 4, marginLeft: 30 },
+  planLineNote: { fontSize: 11, color: "#9C8FB0", marginTop: 4, marginLeft: 30 },
   slotEmpty: {
     display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "1px dashed #3A2857",
-    color: "#6E5F86", borderRadius: 6, padding: "6px 10px", fontSize: 12, cursor: "pointer", width: "100%",
+    color: "#9C8FB0", borderRadius: 6, padding: "6px 10px", fontSize: 12, cursor: "pointer", width: "100%",
   },
-  slotClear: { marginLeft: "auto", background: "transparent", border: "none", color: "#6E5F86", cursor: "pointer", display: "flex" },
+  slotClear: { marginLeft: "auto", background: "transparent", border: "none", color: "#9C8FB0", cursor: "pointer", display: "flex" },
   pickerOverlay: {
     position: "fixed", inset: 0, background: "rgba(5,3,10,0.7)", display: "flex",
     alignItems: "center", justifyContent: "center", zIndex: 50, padding: 20,
@@ -4856,5 +5009,5 @@ const styles = {
   sideRowIcon: { width: 22, height: 22, borderRadius: 4 },
   sideRowName: { fontSize: 13, flex: 1 },
   sideRowScore: { fontSize: 12, fontWeight: 700, fontFamily: "'Rajdhani', sans-serif" },
-  footer: { marginTop: 24, fontSize: 11, color: "#6E5F86", textAlign: "center" },
+  footer: { marginTop: 24, fontSize: 11, color: "#9C8FB0", textAlign: "center" },
 };
