@@ -280,98 +280,37 @@ function flattenPatchSection(value) {
    fails, the UI falls back to the English names from dotaconstants. */
 let ruLocalePromise = null;
 
-/* d2vpkr only tracks the English localization, so these point at mirrors that keep the
-   full language set. Each candidate is tried in order and validated before use. */
-/* Valve's own Russian text. abilities_russian.txt is the right file: it holds tooltips for
-   both abilities and items (items use DOTA_Tooltip_ability_item_* keys) and is far smaller
-   than the full dota_russian.txt. The tracker repo moved orgs, hence several candidates. */
-const RU_SOURCES = [
-  "https://raw.githubusercontent.com/SteamTracking/GameTracking-Dota2/master/game/dota/pak01_dir/resource/localization/abilities_russian.txt",
-  "https://cdn.jsdelivr.net/gh/SteamTracking/GameTracking-Dota2@master/game/dota/pak01_dir/resource/localization/abilities_russian.txt",
-  "https://raw.githubusercontent.com/SteamDatabase/GameTracking-Dota2/master/game/dota/pak01_dir/resource/localization/abilities_russian.txt",
-  "https://raw.githubusercontent.com/SteamTracking/GameTracking-Dota2/master/game/dota/pak01_dir/resource/localization/dota_russian.txt",
-  "https://raw.githubusercontent.com/SteamTracking/GameTracking-Dota2/master/game/dota/panorama/localization/abilities_russian.txt",
-];
-
-function decodeLocaleBuffer(buf) {
-  const bytes = new Uint8Array(buf);
-  // Valve ships localization files as UTF-16; reading them as UTF-8 yields garbage
-  if (bytes[0] === 0xff && bytes[1] === 0xfe) return new TextDecoder("utf-16le").decode(buf);
-  if (bytes[0] === 0xfe && bytes[1] === 0xff) return new TextDecoder("utf-16be").decode(buf);
-  return new TextDecoder("utf-8").decode(buf);
-}
-
-function parseValveKV(text) {
-  const map = {};
-  // values may span several lines, so match across newlines and stop at the closing quote
-  const re = /"([^"\r\n]+)"\s*"((?:[^"\\]|\\.)*)"/g;
-  let m;
-  while ((m = re.exec(text)) !== null) {
-    map[m[1]] = m[2];
-  }
-  return map;
-}
-
-function stripValveMarkup(s) {
-  return s
-    .replace(/<[^>]+>/g, "")
-    .replace(/%%/g, "%")
-    .replace(/\\n/g, "\n")
-    .replace(/\t/g, " ")
-    .trim();
-}
-
 async function getRuLocale() {
   if (ruLocalePromise) return ruLocalePromise;
-  const cached = readLocalCache("dw_ru_locale");
+  const cached = readLocalCache("dw_ru_locale_v2");
   if (cached) {
     ruLocalePromise = Promise.resolve(cached);
     return cached;
   }
   ruLocalePromise = (async () => {
-    let text = null;
-    const tried = [];
-    for (const url of RU_SOURCES) {
+    // parsing happens on the server now — the browser only pulls a small cached JSON
+    const r = await fetch("/api/ru-abilities");
+    if (!r.ok) {
+      let detail = `HTTP ${r.status}`;
       try {
-        const r = await fetch(url);
-        if (!r.ok) {
-          tried.push(`${r.status} ${url}`);
-          continue;
-        }
-        text = decodeLocaleBuffer(await r.arrayBuffer());
-        if (text && text.includes("DOTA_Tooltip")) break;
-        tried.push(`формат не подошёл: ${url}`);
-        text = null;
-      } catch (e) {
-        tried.push(`ошибка сети: ${url}`);
+        const j = await r.json();
+        if (j && j.tried) detail = j.tried.join(" | ");
+      } catch {
+        // keep the status code
       }
-    }
-    if (!text) {
-      console.warn("[DraftHex] русская локализация не загрузилась:\n" + tried.join("\n"));
-      const err = new Error("no locale source");
-      err.tried = tried;
+      const err = new Error("locale endpoint failed");
+      err.tried = [detail];
       throw err;
     }
-
-    const kv = parseValveKV(text);
-    const out = {};
-    for (const [key, value] of Object.entries(kv)) {
-      // ability + item names and descriptions only — everything else is UI chrome we don't need
-      const mName = key.match(/^DOTA_Tooltip_[Aa]bility_([a-z0-9_]+)$/);
-      const mDesc = key.match(/^DOTA_Tooltip_[Aa]bility_([a-z0-9_]+)_Description$/);
-      const mLore = key.match(/^DOTA_Tooltip_[Aa]bility_([a-z0-9_]+)_Lore$/);
-      if (mDesc) out[`d:${mDesc[1]}`] = stripValveMarkup(value);
-      else if (mLore) out[`l:${mLore[1]}`] = stripValveMarkup(value);
-      else if (mName) out[`n:${mName[1]}`] = stripValveMarkup(value);
-    }
+    const json = await r.json();
+    const out = json.strings || {};
     try {
-      writeLocalCache("dw_ru_locale", out);
+      writeLocalCache("dw_ru_locale_v2", out);
     } catch {
-      // subset can still be large; if quota is hit we just refetch next session
+      // quota — refetched next session, still fast thanks to the server cache
     }
     return out;
   })();
-  // a rejected promise must not stay cached, otherwise retrying is impossible until reload
   ruLocalePromise.catch(() => {
     ruLocalePromise = null;
   });
@@ -548,25 +487,24 @@ async function getPublicMatchups(heroId) {
   const cached = readLocalCache(cacheKey, CACHE_TTL_MS * 4);
   if (cached) return cached;
 
-  // Scanning every public match since the patch times out on Explorer, so this looks at a
-  // recent window and caps the scan. Fewer games, but they are ordinary ranked matches.
+  // The database cancels long queries, so this samples a capped slice of recent matches
+  // instead of scanning the whole window: LIMIT lets Postgres stop early.
   const sql = `
     WITH mine AS (
-      SELECT
-        radiant_win,
-        ${heroId} = ANY(radiant_team) AS on_radiant,
-        CASE WHEN ${heroId} = ANY(radiant_team) THEN dire_team ELSE radiant_team END AS enemies
+      SELECT radiant_win,
+             ${heroId} = ANY(radiant_team) AS on_radiant,
+             CASE WHEN ${heroId} = ANY(radiant_team) THEN dire_team ELSE radiant_team END AS enemies
       FROM public_matches
-      WHERE start_time >= extract(epoch FROM now() - interval '7 days')
+      WHERE start_time >= extract(epoch FROM now() - interval '2 days')
         AND (${heroId} = ANY(radiant_team) OR ${heroId} = ANY(dire_team))
-      LIMIT 40000
+      LIMIT 4000
     )
     SELECT enemy AS hero_id,
            COUNT(*) AS games_played,
            SUM(CASE WHEN on_radiant = radiant_win THEN 1 ELSE 0 END) AS wins
     FROM mine, unnest(enemies) AS enemy
     GROUP BY enemy
-    HAVING COUNT(*) >= 30
+    HAVING COUNT(*) >= 10
     ORDER BY enemy
   `.replace(/\s+/g, " ").trim();
 
@@ -2585,7 +2523,7 @@ function CounterTableTab({ heroes, selected, selectedId, setSelectedId }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [heroQuery, setHeroQuery] = useState("");
   const [search, setSearch] = useState("");
-  const [minGames, setMinGames] = useState(30);
+  const [minGames, setMinGames] = useState(10);
   const [direction, setDirection] = useState("counters");
   const [sortDesc, setSortDesc] = useState(true);
   const [source, setSource] = useState("public");
@@ -2715,7 +2653,7 @@ function CounterTableTab({ heroes, selected, selectedId, setSelectedId }) {
           <label style={styles.gamesLabel}>
             Мин. игр: {minGames}
             <input
-              type="range" min="10" max={source === "public" ? 500 : 200} step={10} value={minGames}
+              type="range" min="10" max={source === "public" ? 200 : 200} step={10} value={minGames}
               onChange={(e) => setMinGames(Number(e.target.value))}
               style={styles.slider}
             />
