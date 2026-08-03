@@ -17,8 +17,9 @@ const SOURCES = [
 const KV_KEY = "ru_abilities_v1";
 
 async function kvGet() {
-  const url = process.env.KV_REST_API_URL;
-  const token = process.env.KV_REST_API_TOKEN;
+  // Upstash-интеграция кладёт переменные под разными именами — поддерживаем оба
+  const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) return null;
   try {
     const r = await fetch(`${url}/get/${KV_KEY}`, { headers: { Authorization: `Bearer ${token}` } });
@@ -31,8 +32,9 @@ async function kvGet() {
 }
 
 async function kvSet(value) {
-  const url = process.env.KV_REST_API_URL;
-  const token = process.env.KV_REST_API_TOKEN;
+  // Upstash-интеграция кладёт переменные под разными именами — поддерживаем оба
+  const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) return;
   try {
     await fetch(`${url}/set/${KV_KEY}?EX=604800`, {
