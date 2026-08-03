@@ -1,83 +1,32 @@
-// Vercel serverless function.
-// В репозитории: api/ru-names.js
-//
-// Русские названия и описания предметов, героев и способностей через STRATZ.
-// Нужна та же переменная STRATZ_API_TOKEN, что уже настроена для матчапов.
-//
-// Каждый запрос отправляется отдельно: если у одного не совпадёт схема,
-// остальные всё равно вернутся, а текст ошибки придёт наружу для починки.
-
-/* --- вспомогательные функции (встроены, чтобы не зависеть от других файлов) --- */
-
-function kvCreds() {
-  return {
-    url: process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL,
-    token: process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN,
-  };
-}
-
-async function cacheGet(key) {
-  const { url, token } = kvCreds();
-  if (!url || !token) return null;
-  try {
-    const r = await fetch(`${url}/get/${encodeURIComponent(key)}`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!r.ok) return null;
-    const data = await r.json();
-    return data && data.result ? JSON.parse(data.result) : null;
-  } catch {
-    return null;
-  }
-}
-
-async function cacheSet(key, value, ttlSeconds = 604800) {
-  const { url, token } = kvCreds();
-  if (!url || !token) return;
-  try {
-    await fetch(`${url}/set/${encodeURIComponent(key)}?EX=${ttlSeconds}`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      body: JSON.stringify(JSON.stringify(value)),
-    });
-  } catch {
-    // кэш необязателен
-  }
-}
-
-async function stratzQuery(query, variables) {
-  const token = process.env.STRATZ_API_TOKEN;
-  if (!token) return { ok: false, error: "STRATZ_API_TOKEN не настроен" };
-  try {
-    const r = await fetch("https://api.stratz.com/graphql", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${token}`,
-        "User-Agent": "STRATZ_API",
-      },
-      body: JSON.stringify(variables ? { query, variables } : { query }),
-    });
-    const text = await r.text();
-    let json = null;
-    try {
-      json = JSON.parse(text);
-    } catch {
-      // ограничение по IP приходит обычным текстом, не JSON
-      return { ok: false, error: text.slice(0, 200) };
-    }
-    if (json.errors && json.errors.length) {
-      return { ok: false, error: json.errors.map((e) => e.message).join(" | ").slice(0, 400) };
-    }
-    return { ok: true, data: json.data };
-  } catch (e) {
-    return { ok: false, error: String(e.message || e) };
-  }
-}
+// Vercel serverless function → api/ru-names.js
+// Русские названия предметов, героев и способностей через STRATZ.
+//   ?part=names      только предметы и герои (быстро)
+//   ?part=abilities  только способности
+//   без параметра    всё сразу
 
 export const config = { maxDuration: 30 };
 
-/* --- общий код внутри каждой функции: Vercel не подключает файлы с _ в начале --- */
+/* --- всё необходимое внутри файла: Vercel не подключает файлы с _ в начале,
+       а req.query / res.status в этом проекте недоступны --- */
+
+function getQuery(req) {
+  try {
+    const host = (req.headers && req.headers.host) || "localhost";
+    const u = new URL(req.url, `http://${host}`);
+    const out = {};
+    u.searchParams.forEach((v, k) => { out[k] = v; });
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function sendJson(res, status, obj, cacheHeader) {
+  res.statusCode = status;
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  if (cacheHeader) res.setHeader("Cache-Control", cacheHeader);
+  res.end(JSON.stringify(obj));
+}
 
 function kvCreds() {
   return {
@@ -118,7 +67,6 @@ async function cacheSet(key, value, ttlSeconds = 604800) {
 async function stratzQuery(query, variables) {
   const token = process.env.STRATZ_API_TOKEN;
   if (!token) return { ok: false, error: "STRATZ_API_TOKEN не настроен" };
-
   try {
     const r = await fetch("https://api.stratz.com/graphql", {
       method: "POST",
@@ -134,7 +82,7 @@ async function stratzQuery(query, variables) {
     try {
       json = JSON.parse(text);
     } catch {
-      return { ok: false, error: text.slice(0, 200) };
+      return { ok: false, error: `HTTP ${r.status}: ${text.slice(0, 200)}` };
     }
     if (json.errors && json.errors.length) {
       return { ok: false, error: json.errors.map((e) => e.message).join(" | ").slice(0, 400) };
@@ -144,81 +92,77 @@ async function stratzQuery(query, variables) {
     return { ok: false, error: String(e.message || e) };
   }
 }
-
 
 const Q_ITEMS = `{ constants { items(language: RUSSIAN) { id name displayName language { displayName description } } } }`;
 const Q_HEROES = `{ constants { heroes(language: RUSSIAN) { id shortName displayName } } }`;
 const Q_ABILITIES = `{ constants { abilities(language: RUSSIAN) { id name language { displayName description } } } }`;
 
+function clean(v) {
+  if (!v) return null;
+  const text = Array.isArray(v) ? v.join(" ") : v;
+  return String(text).replace(/<[^>]+>/g, "").trim() || null;
+}
+
 export default async function handler(req, res) {
-  // Описания способностей — самая тяжёлая часть ответа. Отдаём по частям,
-  // чтобы названия предметов и героев появлялись почти сразу.
-  const part = String(req.query.part || "all");
-  const wantItems = part === "all" || part === "names";
+  const part = String(getQuery(req).part || "all");
+  const wantNames = part === "all" || part === "names";
   const wantAbilities = part === "all" || part === "abilities";
 
   const diagnostics = {};
   const items = {};
+  const itemDescriptions = {};
   const heroes = {};
   const abilities = {};
 
   const [ri, rh, ra] = await Promise.all([
-    wantItems ? stratzQuery(Q_ITEMS) : Promise.resolve({ ok: true, data: null }),
-    wantItems ? stratzQuery(Q_HEROES) : Promise.resolve({ ok: true, data: null }),
+    wantNames ? stratzQuery(Q_ITEMS) : Promise.resolve({ ok: true, data: null }),
+    wantNames ? stratzQuery(Q_HEROES) : Promise.resolve({ ok: true, data: null }),
     wantAbilities ? stratzQuery(Q_ABILITIES) : Promise.resolve({ ok: true, data: null }),
   ]);
 
-  const itemDescriptions = {};
   if (ri.ok) {
-    (ri.data?.constants?.items || []).forEach((it) => {
+    const list = (ri.data && ri.data.constants && ri.data.constants.items) || [];
+    list.forEach((it) => {
       if (!it) return;
-      // ключи dotaconstants выглядят как "blink", у STRATZ — "item_blink"
       const key = String(it.name || "").replace(/^item_/, "");
       if (!key) return;
       const loc = it.language || {};
-      const name = loc.displayName || it.displayName;
-      if (name) items[key] = name;
-      const d = loc.description;
-      if (d) {
-        const text = Array.isArray(d) ? d.join(" ") : d;
-        itemDescriptions[key] = String(text).replace(/<[^>]+>/g, "").trim();
-      }
+      const nm = loc.displayName || it.displayName;
+      if (nm) items[key] = nm;
+      const d = clean(loc.description);
+      if (d) itemDescriptions[key] = d;
     });
   } else {
     diagnostics.items = ri.error;
   }
 
   if (rh.ok) {
-    (rh.data?.constants?.heroes || []).forEach((h) => {
-      if (!h || !h.displayName) return;
-      if (h.shortName) heroes[`npc_dota_hero_${h.shortName}`] = h.displayName;
+    const list = (rh.data && rh.data.constants && rh.data.constants.heroes) || [];
+    list.forEach((h) => {
+      if (h && h.shortName && h.displayName) heroes[`npc_dota_hero_${h.shortName}`] = h.displayName;
     });
   } else {
     diagnostics.heroes = rh.error;
   }
 
   if (ra.ok) {
-    (ra.data?.constants?.abilities || []).forEach((a) => {
+    const list = (ra.data && ra.data.constants && ra.data.constants.abilities) || [];
+    list.forEach((a) => {
       if (!a || !a.name) return;
       const loc = a.language || {};
       if (loc.displayName) abilities[`n:${a.name}`] = loc.displayName;
-      if (loc.description) {
-        const desc = Array.isArray(loc.description) ? loc.description.join(" ") : loc.description;
-        abilities[`d:${a.name}`] = String(desc).replace(/<[^>]+>/g, "").trim();
-      }
+      const d = clean(loc.description);
+      if (d) abilities[`d:${a.name}`] = d;
     });
   } else {
     diagnostics.abilities = ra.error;
   }
 
-  const anything = Object.keys(items).length + Object.keys(heroes).length + Object.keys(abilities).length;
-  if (anything === 0) {
+  const total = Object.keys(items).length + Object.keys(heroes).length + Object.keys(abilities).length;
+  if (total === 0) {
     const stale = await cacheGet(`ru_names_${part}`);
-    if (stale) {
-      res.setHeader("Cache-Control", "public, s-maxage=600");
-      return res.status(200).json({ ...stale, stale: true, diagnostics });
-    }
-    return res.status(502).json({ error: "STRATZ не вернул локализацию", diagnostics, part });
+    if (stale) return sendJson(res, 200, Object.assign({}, stale, { stale: true, diagnostics }), "public, s-maxage=600");
+    return sendJson(res, 502, { error: "STRATZ не вернул локализацию", diagnostics, part });
   }
 
   const payload = {
@@ -236,6 +180,5 @@ export default async function handler(req, res) {
   };
 
   await cacheSet(`ru_names_${part}`, payload);
-  res.setHeader("Cache-Control", "public, s-maxage=86400, stale-while-revalidate=604800");
-  return res.status(200).json(payload);
+  return sendJson(res, 200, payload, "public, s-maxage=86400, stale-while-revalidate=604800");
 }
