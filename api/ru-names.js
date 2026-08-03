@@ -7,11 +7,146 @@
 // Каждый запрос отправляется отдельно: если у одного не совпадёт схема,
 // остальные всё равно вернутся, а текст ошибки придёт наружу для починки.
 
-import { stratzQuery, cacheGet, cacheSet } from "./_stratz.js";
+/* --- вспомогательные функции (встроены, чтобы не зависеть от других файлов) --- */
+
+function kvCreds() {
+  return {
+    url: process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL,
+    token: process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN,
+  };
+}
+
+async function cacheGet(key) {
+  const { url, token } = kvCreds();
+  if (!url || !token) return null;
+  try {
+    const r = await fetch(`${url}/get/${encodeURIComponent(key)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!r.ok) return null;
+    const data = await r.json();
+    return data && data.result ? JSON.parse(data.result) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function cacheSet(key, value, ttlSeconds = 604800) {
+  const { url, token } = kvCreds();
+  if (!url || !token) return;
+  try {
+    await fetch(`${url}/set/${encodeURIComponent(key)}?EX=${ttlSeconds}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(JSON.stringify(value)),
+    });
+  } catch {
+    // кэш необязателен
+  }
+}
+
+async function stratzQuery(query, variables) {
+  const token = process.env.STRATZ_API_TOKEN;
+  if (!token) return { ok: false, error: "STRATZ_API_TOKEN не настроен" };
+  try {
+    const r = await fetch("https://api.stratz.com/graphql", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+        "User-Agent": "STRATZ_API",
+      },
+      body: JSON.stringify(variables ? { query, variables } : { query }),
+    });
+    const text = await r.text();
+    let json = null;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      // ограничение по IP приходит обычным текстом, не JSON
+      return { ok: false, error: text.slice(0, 200) };
+    }
+    if (json.errors && json.errors.length) {
+      return { ok: false, error: json.errors.map((e) => e.message).join(" | ").slice(0, 400) };
+    }
+    return { ok: true, data: json.data };
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+}
 
 export const config = { maxDuration: 30 };
 
-const Q_ITEMS = `{ constants { items(language: RUSSIAN) { id name displayName } } }`;
+/* --- общий код внутри каждой функции: Vercel не подключает файлы с _ в начале --- */
+
+function kvCreds() {
+  return {
+    url: process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL,
+    token: process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN,
+  };
+}
+
+async function cacheGet(key) {
+  const { url, token } = kvCreds();
+  if (!url || !token) return null;
+  try {
+    const r = await fetch(`${url}/get/${encodeURIComponent(key)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!r.ok) return null;
+    const data = await r.json();
+    return data && data.result ? JSON.parse(data.result) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function cacheSet(key, value, ttlSeconds = 604800) {
+  const { url, token } = kvCreds();
+  if (!url || !token) return;
+  try {
+    await fetch(`${url}/set/${encodeURIComponent(key)}?EX=${ttlSeconds}`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(JSON.stringify(value)),
+    });
+  } catch {
+    // кэш необязателен
+  }
+}
+
+async function stratzQuery(query, variables) {
+  const token = process.env.STRATZ_API_TOKEN;
+  if (!token) return { ok: false, error: "STRATZ_API_TOKEN не настроен" };
+
+  try {
+    const r = await fetch("https://api.stratz.com/graphql", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+        "User-Agent": "STRATZ_API",
+      },
+      body: JSON.stringify(variables ? { query, variables } : { query }),
+    });
+    const text = await r.text();
+    let json = null;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      return { ok: false, error: text.slice(0, 200) };
+    }
+    if (json.errors && json.errors.length) {
+      return { ok: false, error: json.errors.map((e) => e.message).join(" | ").slice(0, 400) };
+    }
+    return { ok: true, data: json.data };
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+}
+
+
+const Q_ITEMS = `{ constants { items(language: RUSSIAN) { id name displayName language { displayName description } } } }`;
 const Q_HEROES = `{ constants { heroes(language: RUSSIAN) { id shortName displayName } } }`;
 const Q_ABILITIES = `{ constants { abilities(language: RUSSIAN) { id name language { displayName description } } } }`;
 
@@ -33,12 +168,21 @@ export default async function handler(req, res) {
     wantAbilities ? stratzQuery(Q_ABILITIES) : Promise.resolve({ ok: true, data: null }),
   ]);
 
+  const itemDescriptions = {};
   if (ri.ok) {
     (ri.data?.constants?.items || []).forEach((it) => {
-      if (!it || !it.displayName) return;
+      if (!it) return;
       // ключи dotaconstants выглядят как "blink", у STRATZ — "item_blink"
       const key = String(it.name || "").replace(/^item_/, "");
-      if (key) items[key] = it.displayName;
+      if (!key) return;
+      const loc = it.language || {};
+      const name = loc.displayName || it.displayName;
+      if (name) items[key] = name;
+      const d = loc.description;
+      if (d) {
+        const text = Array.isArray(d) ? d.join(" ") : d;
+        itemDescriptions[key] = String(text).replace(/<[^>]+>/g, "").trim();
+      }
     });
   } else {
     diagnostics.items = ri.error;
@@ -80,6 +224,7 @@ export default async function handler(req, res) {
   const payload = {
     part,
     items,
+    itemDescriptions,
     heroes,
     abilities,
     counts: {
