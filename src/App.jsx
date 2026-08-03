@@ -180,6 +180,7 @@ async function getMatchups(heroId) {
   if (!r.ok) throw new Error("network");
   const data = await r.json();
   matchupsCache.set(heroId, data);
+  matchupsMeta.set(heroId, { source: "pro", scope: "про-матчи", stale: false, fetchedAt: Date.now() });
   writeLocalCache(cacheKey, data);
   return data;
 }
@@ -188,14 +189,18 @@ async function getMatchups(heroId) {
    OpenDota's endpoint only covers pro matches, which is a tiny and unrepresentative
    sample, so public is the default everywhere and pro is an explicit choice. */
 const publicMatchupsCache = new Map();
+/* Что именно показано: охват выборки и не устаревшая ли копия. Без этого два человека
+   могли видеть разные цифры и не понимать почему. */
+const matchupsMeta = new Map();
 
 async function getPublicMatchups(heroId) {
   if (publicMatchupsCache.has(heroId)) return publicMatchupsCache.get(heroId);
   const cacheKey = `dw_stratz_mu_${heroId}`;
   const cached = readLocalCache(cacheKey, CACHE_TTL_MS);
-  if (cached) {
-    publicMatchupsCache.set(heroId, cached);
-    return cached;
+  if (cached && cached.rows) {
+    publicMatchupsCache.set(heroId, cached.rows);
+    matchupsMeta.set(heroId, cached.meta || null);
+    return cached.rows;
   }
 
   const r = await fetch(`/api/stratz-matchups?heroId=${heroId}`);
@@ -206,9 +211,11 @@ async function getPublicMatchups(heroId) {
     throw err;
   }
 
+  const meta = { source: "public", scope: json.scope || null, stale: !!json.stale, fetchedAt: Date.now() };
   publicMatchupsCache.set(heroId, json.rows);
+  matchupsMeta.set(heroId, meta);
   try {
-    writeLocalCache(cacheKey, json.rows);
+    writeLocalCache(cacheKey, { rows: json.rows, meta });
   } catch {
     // quota — refetched next session, backend still caches it
   }
@@ -216,7 +223,7 @@ async function getPublicMatchups(heroId) {
 }
 
 /* source: "public" (STRATZ, ordinary games) or "pro" (OpenDota pro matches) */
-function useMatchups(heroId, source = "public") {
+function useMatchups(heroId, source = "public", refreshKey = 0) {
   const [state, setState] = useState({ loading: false, data: null, error: null });
   useEffect(() => {
     if (!heroId) return;
@@ -233,7 +240,9 @@ function useMatchups(heroId, source = "public") {
     const load = source === "pro" ? getMatchups(heroId) : getPublicMatchups(heroId);
     load
       .then((data) => {
-        if (!cancelled) setState({ loading: false, data, error: null, fellBack: false });
+        if (!cancelled) {
+          setState({ loading: false, data, error: null, fellBack: false, meta: matchupsMeta.get(heroId) || null });
+        }
       })
       .catch((e) => {
         // if the public source isn't available yet, show pro data rather than an empty table
@@ -245,7 +254,9 @@ function useMatchups(heroId, source = "public") {
         }
         getMatchups(heroId)
           .then((data) => {
-            if (!cancelled) setState({ loading: false, data, error: null, fellBack: true });
+            if (!cancelled) {
+              setState({ loading: false, data, error: null, fellBack: true, meta: matchupsMeta.get(heroId) || null });
+            }
           })
           .catch(() => {
             if (!cancelled) {
@@ -261,7 +272,7 @@ function useMatchups(heroId, source = "public") {
     return () => {
       cancelled = true;
     };
-  }, [heroId, source]);
+  }, [heroId, source, refreshKey]);
   return state;
 }
 
@@ -385,6 +396,7 @@ async function getRuLocale(onPartial) {
     const partial = {
       partial: true,
       items: names.items || {},
+      itemDescriptions: names.itemDescriptions || {},
       heroes: names.heroes || {},
       abilities: {},
       counts: { items: Object.keys(names.items || {}).length, heroes: Object.keys(names.heroes || {}).length, abilities: 0 },
@@ -404,6 +416,7 @@ async function getRuLocale(onPartial) {
 
     const data = {
       items: partial.items,
+      itemDescriptions: partial.itemDescriptions,
       heroes: partial.heroes,
       abilities,
       counts: {
@@ -441,7 +454,7 @@ function ruName(ru, key, isItem) {
 
 function ruDesc(ru, key, isItem) {
   if (!ru) return null;
-  if (isItem) return null; // STRATZ не отдаёт описания предметов отдельным полем
+  if (isItem) return ru.itemDescriptions?.[key] || null;
   return ru.abilities?.[`d:${key}`] || null;
 }
 
@@ -1433,7 +1446,7 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
             </div>
           </div>
 
-          <ProfileCharts matches={data.matches} wl={data.wl} />
+          <ProfileCharts matches={data.matches} wl={data.wl} heroes={heroes} onOpenCard={onOpenCard} />
 
           {monthlyTrend.length > 0 && (
             <div style={styles.panel}>
@@ -1497,7 +1510,102 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
 
 const WEEKDAY_RU = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
 
-function ProfileCharts({ matches, wl }) {
+const MIX_COLORS = ["#C084FC", "#5FCB8E", "#E5B33D", "#5B9FE0", "#E2574C", "#8B5CF6"];
+
+function HeroMixPanel({ heroCount, heroes, onOpenCard }) {
+  const data = useMemo(() => {
+    const rows = Object.entries(heroCount || {})
+      .map(([id, v]) => ({ hero: heroes.find((h) => h.id === Number(id)), games: v.games, wins: v.wins }))
+      .filter((r) => r.hero)
+      .sort((a, b) => b.games - a.games);
+
+    const top = rows.slice(0, 6);
+    const restGames = rows.slice(6).reduce((s, r) => s + r.games, 0);
+    const out = top.map((r, i) => ({
+      name: r.hero.localized_name,
+      value: r.games,
+      winRate: r.games ? r.wins / r.games : 0,
+      heroId: r.hero.id,
+      color: MIX_COLORS[i % MIX_COLORS.length],
+    }));
+    if (restGames > 0) out.push({ name: "Прочие", value: restGames, color: "#3A2857", heroId: null });
+    return out;
+  }, [heroCount, heroes]);
+
+  if (data.length === 0) return null;
+
+  return (
+    <div style={styles.panel}>
+      <div style={styles.panelHeader}>
+        <Crown size={16} color="#C084FC" />
+        <span style={{ ...styles.panelTitle, color: "#C084FC" }}>На ком играешь</span>
+      </div>
+      <div style={{ width: "100%", height: 190 }}>
+        <ResponsiveContainer>
+          <PieChart>
+            <Pie data={data} dataKey="value" innerRadius={48} outerRadius={76} paddingAngle={2} stroke="none">
+              {data.map((d) => <Cell key={d.name} fill={d.color} />)}
+            </Pie>
+            <Tooltip
+              contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 10, fontSize: 12, padding: "8px 12px" }}
+              itemStyle={{ color: "#F2EAFB" }}
+              cursor={false}
+              formatter={(v, n) => [`${v} игр`, n]}
+            />
+          </PieChart>
+        </ResponsiveContainer>
+      </div>
+      {data.filter((d) => d.heroId).map((d) => (
+        <div key={d.name} className="role-row" style={styles.roleRow} onClick={() => onOpenCard(d.heroId)}>
+          <span style={{ ...styles.mixDot, background: d.color }} />
+          <span style={styles.matchupName}>{d.name}</span>
+          <span style={styles.mutedText}>{d.value} игр</span>
+          <span style={{ ...styles.rolePct, color: d.winRate >= 0.5 ? "#5FCB8E" : "#E2574C" }}>
+            {(d.winRate * 100).toFixed(0)}%
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RecentMatchesPanel({ recent, heroes, onOpenCard }) {
+  if (!recent || recent.length === 0) return null;
+  return (
+    <div style={styles.panel}>
+      <div style={styles.panelHeader}>
+        <History size={16} color="#C084FC" />
+        <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Последние матчи</span>
+      </div>
+      {recent.map((m) => {
+        const hero = heroes.find((h) => h.id === m.heroId);
+        if (!hero) return null;
+        const kda = m.deaths > 0 ? ((m.kills + m.assists) / m.deaths).toFixed(1) : "∞";
+        return (
+          <div
+            key={m.matchId}
+            className="role-row"
+            style={{ ...styles.roleRow, borderLeft: `3px solid ${m.won ? "#5FCB8E" : "#E2574C"}`, paddingLeft: 8 }}
+            onClick={() => onOpenCard(hero.id)}
+          >
+            <HeroIcon hero={hero} style={styles.matchupIcon} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={styles.matchupName}>{hero.localized_name}</div>
+              <div style={{ ...styles.mutedText, fontSize: 11 }}>
+                {m.kills}/{m.deaths}/{m.assists} · KDA {kda} · {Math.round(m.duration / 60)} мин
+              </div>
+            </div>
+            <span style={{ ...styles.rolePct, color: m.won ? "#5FCB8E" : "#E2574C" }}>
+              {m.won ? "Победа" : "Пораж."}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function ProfileCharts({ matches, wl, heroes, onOpenCard }) {
   const stats = useMemo(() => {
     const list = Array.isArray(matches) ? matches.filter((m) => m.player_slot != null && m.radiant_win != null) : [];
     if (list.length === 0) return null;
@@ -1548,9 +1656,55 @@ function ProfileCharts({ matches, wl }) {
       }
     });
 
+    // распределение по героям
+    const heroCount = {};
+    list.forEach((m) => {
+      if (!m.hero_id) return;
+      if (!heroCount[m.hero_id]) heroCount[m.hero_id] = { games: 0, wins: 0 };
+      heroCount[m.hero_id].games += 1;
+      if (won(m)) heroCount[m.hero_id].wins += 1;
+    });
+
+    // винрейт по времени суток
+    const dayParts = [
+      { key: "night", label: "Ночь 0–6", from: 0, to: 6, games: 0, wins: 0 },
+      { key: "morning", label: "Утро 6–12", from: 6, to: 12, games: 0, wins: 0 },
+      { key: "day", label: "День 12–18", from: 12, to: 18, games: 0, wins: 0 },
+      { key: "evening", label: "Вечер 18–24", from: 18, to: 24, games: 0, wins: 0 },
+    ];
+    list.forEach((m) => {
+      if (!m.start_time) return;
+      const h = new Date(m.start_time * 1000).getHours();
+      const part = dayParts.find((x) => h >= x.from && h < x.to);
+      if (!part) return;
+      part.games += 1;
+      if (won(m)) part.wins += 1;
+    });
+
+    const recent = [...list]
+      .filter((m) => m.start_time)
+      .sort((a, b) => b.start_time - a.start_time)
+      .slice(0, 10)
+      .map((m) => ({
+        matchId: m.match_id,
+        heroId: m.hero_id,
+        won: won(m),
+        kills: m.kills || 0,
+        deaths: m.deaths || 0,
+        assists: m.assists || 0,
+        gpm: m.gold_per_min || 0,
+        duration: m.duration || 0,
+        startTime: m.start_time,
+      }));
+
     const n = list.length;
     return {
       n,
+      heroCount,
+      recent,
+      dayParts: dayParts
+        .filter((x) => x.games >= 2)
+        .map((x) => ({ label: x.label, winRate: Math.round((x.wins / x.games) * 1000) / 10, games: x.games })),
       kda: deaths > 0 ? ((kills + assists) / deaths).toFixed(2) : "—",
       avgKills: (kills / n).toFixed(1),
       avgDeaths: (deaths / n).toFixed(1),
@@ -1688,6 +1842,45 @@ function ProfileCharts({ matches, wl }) {
         <div style={styles.panel}>
           <div style={styles.panelHeader}>
             <BarChart3 size={16} color="#C084FC" />
+            <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Винрейт по времени суток</span>
+          </div>
+          {stats.dayParts.length === 0 ? (
+            <div style={styles.emptyState}>Мало данных.</div>
+          ) : (
+            <div style={{ width: "100%", height: 200 }}>
+              <ResponsiveContainer>
+                <BarChart data={stats.dayParts} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#2A1A40" vertical={false} />
+                  <XAxis dataKey="label" tick={{ fill: "#9C8FB0", fontSize: 10 }} axisLine={{ stroke: "#2A1A40" }} tickLine={false} />
+                  <YAxis domain={[0, 100]} tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={false} tickLine={false} unit="%" />
+                  <Tooltip
+                    contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 10, fontSize: 12, padding: "8px 12px" }}
+                    itemStyle={{ color: "#F2EAFB" }}
+                    cursor={{ fill: "rgba(178,75,243,0.10)" }}
+                    labelStyle={{ color: "#F2EAFB" }}
+                    formatter={(v, n, p) => [`${v}% (${p.payload.games} игр)`, "Винрейт"]}
+                  />
+                  <Bar dataKey="winRate" radius={[4, 4, 0, 0]}>
+                    {stats.dayParts.map((d) => (
+                      <Cell key={d.label} fill={d.winRate >= 50 ? "#5FCB8E" : "#E2574C"} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="two-col" style={styles.twoCol}>
+        <HeroMixPanel heroCount={stats.heroCount} heroes={heroes} onOpenCard={onOpenCard} />
+        <RecentMatchesPanel recent={stats.recent} heroes={heroes} onOpenCard={onOpenCard} />
+      </div>
+
+      <div className="two-col" style={styles.twoCol}>
+        <div style={styles.panel}>
+          <div style={styles.panelHeader}>
+            <BarChart3 size={16} color="#C084FC" />
             <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Винрейт по длине игры</span>
           </div>
           {stats.duration.length === 0 ? (
@@ -1817,7 +2010,12 @@ function HeroCardTab({ heroes, selected, selectedId, setSelectedId }) {
               >
                 <HeroIcon hero={h} style={styles.heroChipIcon} />
                 <span style={styles.heroChipName}>{h.localized_name}</span>
-                <span style={{ ...styles.attrDot, background: a.color }} />
+                <span
+                  style={{ ...styles.attrBadge, color: a.color, borderColor: a.color }}
+                  title={a.label}
+                >
+                  {a.label[0]}
+                </span>
               </button>
             );
           })}
@@ -2075,10 +2273,49 @@ function LaneRoleChart({ heroId }) {
   );
 }
 
+/* Числа «докручиваются» от нуля при появлении. Нечисловые значения показываются как есть. */
+function useCountUp(value, duration = 700) {
+  const numeric = typeof value === "number" ? value : Number(String(value).replace(/[^\d.,-]/g, "").replace(",", "."));
+  const isNumber = Number.isFinite(numeric) && String(value).trim() !== "";
+  const [shown, setShown] = useState(isNumber ? 0 : null);
+
+  useEffect(() => {
+    if (!isNumber) return;
+    if (typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      setShown(numeric);
+      return;
+    }
+    let raf;
+    const start = performance.now();
+    const tick = (now) => {
+      const p = Math.min(1, (now - start) / duration);
+      const eased = 1 - Math.pow(1 - p, 3);
+      setShown(numeric * eased);
+      if (p < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [numeric, isNumber, duration]);
+
+  if (!isNumber) return null;
+  return shown;
+}
+
 function Stat({ label, value }) {
+  const animated = useCountUp(value);
+  let display = value;
+  if (animated != null) {
+    const raw = String(value);
+    const decimals = (raw.split(".")[1] || "").replace(/[^\d]/g, "").length;
+    const suffix = raw.replace(/^[\d\s.,-]+/, "");
+    display = `${animated.toLocaleString("ru-RU", {
+      minimumFractionDigits: decimals,
+      maximumFractionDigits: decimals,
+    })}${suffix ? ` ${suffix}` : ""}`.trim();
+  }
   return (
     <div className="stat-box" style={styles.statBox}>
-      <div style={styles.statValue}>{value}</div>
+      <div style={styles.statValue}>{display}</div>
       <div style={styles.statLabel}>{label}</div>
     </div>
   );
@@ -3137,9 +3374,23 @@ function CounterTableTab({ heroes, selected, selectedId, setSelectedId }) {
   const [direction, setDirection] = useState("counters");
   const [sortDesc, setSortDesc] = useState(true);
   const [source, setSource] = useState("public");
-  const { data: matchups, loading, error, fellBack } = useMatchups(selectedId, source);
+  const [refreshKey, setRefreshKey] = useState(0);
+  const { data: matchups, loading, error, fellBack, meta } = useMatchups(selectedId, source, refreshKey);
 
   const heroById = (id) => heroes.find((h) => h.id === id);
+
+  function refreshMatchups() {
+    publicMatchupsCache.delete(selectedId);
+    matchupsCache.delete(selectedId);
+    matchupsMeta.delete(selectedId);
+    try {
+      localStorage.removeItem(`dw_stratz_mu_${selectedId}`);
+      localStorage.removeItem(`dw_matchups_${selectedId}`);
+    } catch {
+      // storage unavailable — in-memory reset is enough for this session
+    }
+    setRefreshKey((k) => k + 1);
+  }
 
   const rows = useMemo(() => {
     if (!matchups) return [];
@@ -3228,11 +3479,23 @@ function CounterTableTab({ heroes, selected, selectedId, setSelectedId }) {
         </button>
       </div>
 
-      {fellBack && (
-        <div style={{ ...styles.mutedText, fontSize: 12 }}>
-          Обычные матчи пока недоступны — показаны данные про-сцены.
-        </div>
-      )}
+      <div style={styles.sourceBar}>
+        <span style={styles.sourceDot} />
+        <span>
+          {fellBack
+            ? "Обычные матчи недоступны — показаны данные про-сцены"
+            : meta && meta.source === "pro"
+            ? "Про-матчи"
+            : `Обычные матчи${meta && meta.scope ? ` · ${meta.scope}` : ""}`}
+        </span>
+        {meta && meta.stale && <span style={styles.sourceStale}>сохранённая копия</span>}
+        {meta && meta.fetchedAt && (
+          <span style={styles.sourceTime}>
+            обновлено {new Date(meta.fetchedAt).toLocaleString("ru-RU", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}
+          </span>
+        )}
+        <button style={styles.sourceRefresh} onClick={refreshMatchups}>Обновить</button>
+      </div>
 
       <div className="toolbar" style={styles.toolbar}>
         <div style={styles.segment}>
@@ -4192,14 +4455,12 @@ function ReferenceTab({ heroes }) {
         </button>
       </div>
 
-      {lang === "ru" && (
+      {lang === "ru" && (locale.loading || locale.failed) && (
         <div style={locale.failed ? styles.localeError : styles.localeStatus}>
           <div>
-            {locale.loading && !locale.data && "Загружаю русскую локализацию…"}
-            {locale.loading && locale.data && "Названия загружены, догружаю описания способностей…"}
-            {!locale.loading && locale.data && "Русская локализация загружена"}
-            {!locale.loading && !locale.data && !locale.failed && "Локализация не запрашивалась"}
-            {locale.failed && "Способности: не загрузились, показаны оригинальные названия"}
+            {locale.loading && !locale.data && "Перевод загружается — пока показаны оригинальные названия"}
+            {locale.loading && locale.data && "Названия переведены, догружаю описания…"}
+            {locale.failed && "Перевод недоступен — показаны оригинальные названия"}
           </div>
           {locale.data && locale.data.counts && (
             <div style={{ marginTop: 4 }}>
@@ -5081,7 +5342,11 @@ const styles = {
   },
   heroChipIcon: { width: 24, height: 24, borderRadius: 4, flexShrink: 0 },
   heroChipName: { fontSize: 13, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
-  attrDot: { width: 8, height: 8, borderRadius: "50%", flexShrink: 0 },
+  attrBadge: {
+    width: 18, height: 18, borderRadius: 5, border: "1px solid", flexShrink: 0,
+    display: "flex", alignItems: "center", justifyContent: "center",
+    fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 11, lineHeight: 1,
+  },
   detail: { display: "flex", flexDirection: "column", gap: 20, minWidth: 0 },
   card: { background: "#140B22", border: "1px solid #2F1F49", borderRadius: 16, padding: 22, boxShadow: "0 0 40px rgba(109,40,217,0.12)", minWidth: 0, overflow: "hidden" },
   cardTop: { display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" },
@@ -5135,6 +5400,20 @@ const styles = {
   dropdownItem: { display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", cursor: "pointer" },
   dropdownIcon: { width: 22, height: 22, borderRadius: 4 },
   toolbar: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" },
+  sourceBar: {
+    display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap",
+    fontSize: 12, color: "#9C8FB0", background: "#0E081A",
+    border: "1px solid #2C1C42", borderRadius: 8, padding: "8px 12px",
+  },
+  sourceDot: { width: 7, height: 7, borderRadius: "50%", background: "#5FCB8E", flexShrink: 0 },
+  sourceStale: {
+    fontSize: 10, color: "#E5B33D", border: "1px solid #4A3D1E", borderRadius: 999, padding: "1px 7px",
+  },
+  sourceTime: { fontSize: 11, color: "#9C8FB0" },
+  sourceRefresh: {
+    marginLeft: "auto", background: "transparent", border: "1px solid #3A2857",
+    color: "#C4B8D8", fontSize: 11, padding: "4px 10px", borderRadius: 999, cursor: "pointer",
+  },
   segment: {
     display: "flex", gap: 6, background: "#0E081A", border: "1px solid #2C1C42", borderRadius: 8, padding: 4,
     overflowX: "auto", WebkitOverflowScrolling: "touch", maxWidth: "100%", minWidth: 0,
@@ -5199,6 +5478,7 @@ const styles = {
     lineHeight: 1.1,
   },
   donutSub: { fontSize: 11, color: "#9C8FB0", marginTop: 2 },
+  mixDot: { width: 10, height: 10, borderRadius: 3, flexShrink: 0 },
   streakRow: { display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 },
   streakChip: {
     fontSize: 11, padding: "5px 11px", borderRadius: 999, border: "1px solid", fontWeight: 600,
