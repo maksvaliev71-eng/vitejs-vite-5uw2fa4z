@@ -79,6 +79,7 @@ function Toast({ message, onClose }) {
 
 function HeroIcon({ hero, field = "icon", style, alt }) {
   const [failed, setFailed] = useState(false);
+  if (!hero) return <span style={{ ...style, background: "#2A1A40", display: "inline-block" }} />;
   const a = ATTR[hero.primary_attr] || ATTR.all;
   if (failed) {
     return (
@@ -335,17 +336,22 @@ async function getPatchNotes() {
 /* patchnotes.json groups changes by patch, then by hero/item key. The exact nesting has
    changed across versions, so this flattens whatever shape it finds into printable lines
    instead of assuming one structure. */
-function flattenPatchSection(value) {
-  if (!value) return [];
-  if (typeof value === "string") return [value];
-  if (Array.isArray(value)) {
-    return value.flatMap((v) => {
-      if (typeof v === "string") return [v];
-      if (v && typeof v === "object") return [v.note || v.info || ""].filter(Boolean);
-      return [];
-    });
+/* Структура patchnotes.json менялась между версиями, поэтому вытаскиваем все строковые
+   значения из любой вложенности, а не рассчитываем на конкретную форму. */
+function flattenPatchSection(value, depth = 0) {
+  if (value == null || depth > 6) return [];
+  if (typeof value === "string") {
+    const s = value.trim();
+    return s ? [s] : [];
   }
-  if (typeof value === "object") return Object.values(value).flatMap(flattenPatchSection);
+  if (typeof value === "number" || typeof value === "boolean") return [];
+  if (Array.isArray(value)) return value.flatMap((v) => flattenPatchSection(v, depth + 1));
+  if (typeof value === "object") {
+    // у объектов-заметок текст лежит в одном из этих полей
+    const direct = value.note ?? value.info ?? value.text ?? value.description;
+    if (typeof direct === "string" && direct.trim()) return [direct.trim()];
+    return Object.values(value).flatMap((v) => flattenPatchSection(v, depth + 1));
+  }
   return [];
 }
 
@@ -730,17 +736,18 @@ async function fetchPlayerBundle(accountId) {
 
   const [profileRes, wlRes, heroesRes, matchesRes, peersRes] = await Promise.all([
     fetch(`https://api.opendota.com/api/players/${accountId}`),
-    fetch(`https://api.opendota.com/api/players/${accountId}/wl`),
-    fetch(`https://api.opendota.com/api/players/${accountId}/heroes`),
+    // lobby_type=7 — рейтинговые матчи; wl без limit даёт статистику за всё время
+    fetch(`https://api.opendota.com/api/players/${accountId}/wl?lobby_type=7`),
+    fetch(`https://api.opendota.com/api/players/${accountId}/heroes?lobby_type=7`),
     // gpm/xpm/last_hits/lane_role приходят только если запросить их явно
     fetch(
-      `https://api.opendota.com/api/players/${accountId}/matches?limit=300` +
+      `https://api.opendota.com/api/players/${accountId}/matches?limit=300&lobby_type=7` +
         "&project=kills&project=deaths&project=assists" +
         "&project=gold_per_min&project=xp_per_min&project=last_hits" +
         "&project=lane_role&project=duration&project=hero_damage&project=tower_damage" +
         "&project=hero_id&project=start_time&project=radiant_win&project=player_slot"
     ),
-    fetch(`https://api.opendota.com/api/players/${accountId}/peers`),
+    fetch(`https://api.opendota.com/api/players/${accountId}/peers?lobby_type=7`),
   ]);
   if (!profileRes.ok || !wlRes.ok || !heroesRes.ok || !matchesRes.ok) throw new Error("network");
 
@@ -1521,6 +1528,34 @@ const WEEKDAY_RU = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
 
 const MIX_COLORS = ["#C084FC", "#5FCB8E", "#E5B33D", "#5B9FE0", "#E2574C", "#8B5CF6"];
 
+/* Иконка героя ставится снаружи своего сегмента кольца. Мелкие сегменты пропускаем —
+   иначе картинки налезают друг на друга. */
+function renderHeroSliceIcon(props) {
+  const { cx, cy, midAngle, outerRadius, payload, percent } = props;
+  if (!payload || !payload.icon || percent < 0.06) return null;
+  const RAD = Math.PI / 180;
+  const r = outerRadius + 20;
+  const x = cx + r * Math.cos(-midAngle * RAD);
+  const y = cy + r * Math.sin(-midAngle * RAD);
+  const size = 26;
+  return (
+    <g>
+      <circle cx={x} cy={y} r={size / 2 + 2} fill="#140B22" stroke={payload.color} strokeWidth={1.5} />
+      <clipPath id={`mix-clip-${payload.heroId}`}>
+        <circle cx={x} cy={y} r={size / 2} />
+      </clipPath>
+      <image
+        href={payload.icon}
+        x={x - size / 2}
+        y={y - size / 2}
+        width={size}
+        height={size}
+        clipPath={`url(#mix-clip-${payload.heroId})`}
+      />
+    </g>
+  );
+}
+
 function HeroMixPanel({ heroCount, heroes, onOpenCard }) {
   const data = useMemo(() => {
     const rows = Object.entries(heroCount || {})
@@ -1535,6 +1570,7 @@ function HeroMixPanel({ heroCount, heroes, onOpenCard }) {
       value: r.games,
       winRate: r.games ? r.wins / r.games : 0,
       heroId: r.hero.id,
+      icon: img(r.hero.icon),
       color: MIX_COLORS[i % MIX_COLORS.length],
     }));
     if (restGames > 0) out.push({ name: "Прочие", value: restGames, color: "#3A2857", heroId: null });
@@ -1549,10 +1585,20 @@ function HeroMixPanel({ heroCount, heroes, onOpenCard }) {
         <Crown size={16} color="#C084FC" />
         <span style={{ ...styles.panelTitle, color: "#C084FC" }}>На ком играешь</span>
       </div>
-      <div style={{ width: "100%", height: 190 }}>
+      <div style={{ width: "100%", height: 230 }}>
         <ResponsiveContainer>
           <PieChart>
-            <Pie data={data} dataKey="value" innerRadius={48} outerRadius={76} paddingAngle={2} stroke="none">
+            <Pie
+              data={data}
+              dataKey="value"
+              innerRadius={46}
+              outerRadius={72}
+              paddingAngle={2}
+              stroke="none"
+              labelLine={false}
+              label={renderHeroSliceIcon}
+              isAnimationActive={false}
+            >
               {data.map((d) => <Cell key={d.name} fill={d.color} />)}
             </Pie>
             <Tooltip
@@ -1567,6 +1613,7 @@ function HeroMixPanel({ heroCount, heroes, onOpenCard }) {
       {data.filter((d) => d.heroId).map((d) => (
         <div key={d.name} className="role-row" style={styles.roleRow} onClick={() => onOpenCard(d.heroId)}>
           <span style={{ ...styles.mixDot, background: d.color }} />
+          <HeroIcon hero={heroes.find((h) => h.id === d.heroId)} style={styles.matchupIcon} />
           <span style={styles.matchupName}>{d.name}</span>
           <span style={styles.mutedText}>{d.value} игр</span>
           <span style={{ ...styles.rolePct, color: d.winRate >= 0.5 ? "#5FCB8E" : "#E2574C" }}>
@@ -4683,7 +4730,14 @@ function PatchRow({ patch, isLatest }) {
           {notes.loading && <SkeletonRows count={3} />}
           {notes.error && <div style={styles.emptyState}>Не удалось загрузить изменения этого патча.</div>}
           {!notes.loading && !notes.error && sections.length === 0 && (
-            <div style={styles.emptyState}>Для этого патча разобранных изменений нет.</div>
+            <div style={styles.emptyState}>
+              Для этого патча разобранных изменений нет.
+              {notes.data && (
+                <div style={{ ...styles.localeTried, textAlign: "left" }}>
+                  Полученные разделы: {Object.keys(notes.data).slice(0, 12).join(", ") || "пусто"}
+                </div>
+              )}
+            </div>
           )}
           {sections.map((s) => (
             <div key={s.title} style={styles.patchSection}>
