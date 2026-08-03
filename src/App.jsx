@@ -337,49 +337,96 @@ function flattenPatchSection(value) {
    fails, the UI falls back to the English names from dotaconstants. */
 let ruLocalePromise = null;
 
-async function getRuLocale() {
+function resetRuLocale() {
+  ruLocalePromise = null;
+}
+
+/* Загружается в два этапа: сначала лёгкие названия предметов и героев (появляются почти
+   сразу), затем описания способностей — они весят заметно больше. Таймаут охватывает и
+   чтение тела ответа: раньше он снимался раньше времени и загрузка могла висеть вечно. */
+async function fetchRuPart(part, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const r = await fetch(`/api/ru-names?part=${part}`, { signal: controller.signal });
+    const json = await r.json().catch(() => null);
+    if (!r.ok || !json) {
+      const detail =
+        json && json.diagnostics
+          ? Object.entries(json.diagnostics).map(([k, v]) => `${k}: ${v}`)
+          : [`HTTP ${r.status}`];
+      throw Object.assign(new Error("part failed"), { tried: detail });
+    }
+    return json;
+  } catch (e) {
+    if (e && e.name === "AbortError") {
+      throw Object.assign(new Error("timeout"), { tried: [`${part}: превышено время ожидания`] });
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function getRuLocale(onPartial) {
   if (ruLocalePromise) return ruLocalePromise;
-  const cached = readLocalCache("dw_ru_all_v1");
-  if (cached) {
+
+  const cached = readLocalCache("dw_ru_all_v2");
+  const cachedIsUsable =
+    cached && (Object.keys(cached.items || {}).length > 0 || Object.keys(cached.abilities || {}).length > 0);
+  if (cachedIsUsable) {
     ruLocalePromise = Promise.resolve(cached);
     return cached;
   }
-  ruLocalePromise = (async () => {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 30000);
-    let r;
-    try {
-      r = await fetch("/api/ru-names", { signal: controller.signal });
-    } catch (e) {
-      clearTimeout(timer);
-      const err = new Error("locale request failed");
-      err.tried = [e && e.name === "AbortError" ? "превышено время ожидания" : "сеть недоступна"];
-      throw err;
-    }
-    clearTimeout(timer);
 
-    const json = await r.json().catch(() => null);
-    if (!r.ok || !json) {
-      const err = new Error("locale endpoint failed");
-      const detail = json && json.diagnostics ? Object.entries(json.diagnostics).map(([k, v]) => `${k}: ${v}`) : [`HTTP ${r.status}`];
-      err.tried = detail;
-      throw err;
+  ruLocalePromise = (async () => {
+    const names = await fetchRuPart("names", 25000);
+
+    const partial = {
+      partial: true,
+      items: names.items || {},
+      heroes: names.heroes || {},
+      abilities: {},
+      counts: { items: Object.keys(names.items || {}).length, heroes: Object.keys(names.heroes || {}).length, abilities: 0 },
+      diagnostics: names.diagnostics || {},
+    };
+    if (onPartial) onPartial(partial);
+
+    // описания способностей грузим следом; если не выйдет — оставляем то, что уже есть
+    let abilities = {};
+    let abilitiesError = null;
+    try {
+      const ab = await fetchRuPart("abilities", 40000);
+      abilities = ab.abilities || {};
+    } catch (e) {
+      abilitiesError = e && e.tried ? e.tried.join(" | ") : "не загрузились";
     }
 
     const data = {
-      abilities: json.abilities || {},
-      items: json.items || {},
-      heroes: json.heroes || {},
-      counts: json.counts || {},
-      diagnostics: json.diagnostics || {},
+      items: partial.items,
+      heroes: partial.heroes,
+      abilities,
+      counts: {
+        items: Object.keys(partial.items).length,
+        heroes: Object.keys(partial.heroes).length,
+        abilities: Object.keys(abilities).length,
+      },
+      diagnostics: abilitiesError
+        ? { ...partial.diagnostics, abilities: abilitiesError }
+        : partial.diagnostics,
     };
-    try {
-      writeLocalCache("dw_ru_all_v1", data);
-    } catch {
-      // quota — server still caches it
+
+    const hasContent = data.counts.items > 0 || data.counts.abilities > 0;
+    if (hasContent) {
+      try {
+        writeLocalCache("dw_ru_all_v2", data);
+      } catch {
+        // quota — server still caches it
+      }
     }
     return data;
   })();
+
   ruLocalePromise.catch(() => {
     ruLocalePromise = null;
   });
@@ -3819,10 +3866,13 @@ function ReferenceTab({ heroes }) {
 
   // Russian pack is a one-time download, fetched only when RU is actually selected
   useEffect(() => {
-    if (lang !== "ru" || locale.data || locale.loading || locale.failed) return;
+    if (lang !== "ru" || locale.loading || locale.failed || (locale.data && !locale.data.partial)) return;
     let cancelled = false;
     setLocale((s) => ({ ...s, loading: true }));
-    getRuLocale()
+    getRuLocale((partial) => {
+      // показываем названия предметов и героев, не дожидаясь описаний способностей
+      if (!cancelled) setLocale({ loading: true, data: partial, failed: false, tried: null });
+    })
       .then((data) => {
         if (!cancelled) setLocale({ loading: false, data, failed: false, tried: null });
       })
@@ -3836,6 +3886,17 @@ function ReferenceTab({ heroes }) {
     setLang("ru");
     // clear a previous failure so pressing RU actually retries
     if (locale.failed) setLocale({ loading: false, data: null, failed: false, tried: null });
+  }
+
+  function resetLocale() {
+    try {
+      localStorage.removeItem("dw_ru_all_v2");
+    } catch {
+      // storage unavailable — the in-memory reset below still applies
+    }
+    resetRuLocale();
+    setLocale({ loading: false, data: null, failed: false, tried: null });
+    setLang("ru");
   }
 
   const ru = lang === "ru" ? locale.data : null;
@@ -3913,7 +3974,8 @@ function ReferenceTab({ heroes }) {
       {lang === "ru" && (
         <div style={locale.failed ? styles.localeError : styles.localeStatus}>
           <div>
-            {locale.loading && "Загружаю русскую локализацию…"}
+            {locale.loading && !locale.data && "Загружаю русскую локализацию…"}
+            {locale.loading && locale.data && "Названия загружены, догружаю описания способностей…"}
             {!locale.loading && locale.data && "Русская локализация загружена"}
             {!locale.loading && !locale.data && !locale.failed && "Локализация не запрашивалась"}
             {locale.failed && "Способности: не загрузились, показаны оригинальные названия"}
@@ -3934,9 +3996,12 @@ function ReferenceTab({ heroes }) {
               {locale.tried.map((t, i) => <div key={i}>{t}</div>)}
             </div>
           )}
-          {locale.failed && (
-            <button style={{ ...styles.tourGo, marginTop: 8 }} onClick={selectRu}>Повторить</button>
-          )}
+          <div style={{ display: "flex", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+            {locale.failed && (
+              <button style={styles.tourGo} onClick={selectRu}>Повторить</button>
+            )}
+            <button style={styles.tourGo} onClick={resetLocale}>Сбросить кэш и загрузить заново</button>
+          </div>
         </div>
       )}
 
