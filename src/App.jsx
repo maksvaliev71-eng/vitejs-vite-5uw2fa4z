@@ -785,7 +785,25 @@ export default function App() {
     if (id) window.history.replaceState({}, "", window.location.pathname);
     return id;
   });
-  const [tab, setTab] = useState(() => (steamIdFromUrl ? "profile" : "home"));
+  const [tab, setTabState] = useState(() => {
+    if (steamIdFromUrl) return "profile";
+    try {
+      const saved = localStorage.getItem("dw_last_tab");
+      if (saved && TABS.some((t) => t.key === saved)) return saved;
+    } catch {
+      // storage unavailable — fall back to home
+    }
+    return "home";
+  });
+
+  function setTab(next) {
+    setTabState(next);
+    try {
+      localStorage.setItem("dw_last_tab", next);
+    } catch {
+      // storage unavailable — tab just won't persist
+    }
+  }
   const [selectedId, setSelectedId] = useState(null);
   const [toast, setToast] = useState(null);
   const [showTour, setShowTour] = useState(() => {
@@ -926,6 +944,7 @@ export default function App() {
         }
         .recharts-wrapper *:focus, .recharts-wrapper *:focus-visible { outline: none !important; }
         .recharts-tooltip-wrapper { outline: none !important; }
+        input, select, textarea { font-size: 16px !important; }
         .home-text-col { text-align: left; }
         .rank-scroll { overflow-x: auto; scrollbar-width: none; }
         .rank-scroll::-webkit-scrollbar { display: none; }
@@ -2225,16 +2244,23 @@ function DraftTab({ heroes, onOpenCard }) {
   const heroById = (id) => heroes.find((h) => h.id === id);
   const pickedIds = useMemo(() => [...radiant, ...dire].filter(Boolean), [radiant, dire]);
 
+  /* Драфт считается по обычным матчам, как и остальные разделы. На про-сцене выборки
+     крошечные, и оценка по ним получалась недостоверной. При отказе источника обычных
+     игр подставляются про-данные, чтобы расчёт не пропадал совсем. */
   useEffect(() => {
     let cancelled = false;
     (async () => {
       for (const id of pickedIds) {
-        if (!matchupsCache.has(id)) {
+        if (publicMatchupsCache.has(id) || matchupsCache.has(id)) continue;
+        try {
+          await getPublicMatchups(id);
+          if (!cancelled) forceRerender((v) => v + 1);
+        } catch {
           try {
             await getMatchups(id);
             if (!cancelled) forceRerender((v) => v + 1);
           } catch {
-            // hero's matchups failed to load — pairs involving it just stay "unknown"
+            // hero's matchups unavailable — pairs involving it stay "unknown"
           }
         }
       }
@@ -2245,13 +2271,17 @@ function DraftTab({ heroes, onOpenCard }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pickedIds.join(",")]);
 
+  function matchupsFor(id) {
+    return publicMatchupsCache.get(id) || matchupsCache.get(id) || null;
+  }
+
   function pairWinRate(aId, bId) {
-    const aData = matchupsCache.get(aId);
+    const aData = matchupsFor(aId);
     if (aData) {
       const e = aData.find((m) => m.hero_id === bId);
       if (e && e.games_played > 0) return e.wins / e.games_played;
     }
-    const bData = matchupsCache.get(bId);
+    const bData = matchupsFor(bId);
     if (bData) {
       const e = bData.find((m) => m.hero_id === aId);
       if (e && e.games_played > 0) return 1 - e.wins / e.games_played;
@@ -2276,6 +2306,56 @@ function DraftTab({ heroes, onOpenCard }) {
   const totalPossiblePairs = radiant.filter(Boolean).length * dire.filter(Boolean).length;
   const radiantEstimate =
     matchupPairs.length > 0 ? matchupPairs.reduce((s, x) => s + x.wr, 0) / matchupPairs.length : null;
+
+  const verdict = useMemo(() => {
+    if (radiantEstimate == null) return null;
+    const radiantFavoured = radiantEstimate >= 0.5;
+    const pct = Math.round((radiantFavoured ? radiantEstimate : 1 - radiantEstimate) * 100);
+    const margin = Math.abs(radiantEstimate - 0.5) * 200; // 0..100
+    let title;
+    if (margin < 3) title = "Примерно равны";
+    else title = `Впереди ${radiantFavoured ? "Radiant" : "Dire"}`;
+    return {
+      pct,
+      title,
+      color: margin < 3 ? "#C084FC" : radiantFavoured ? "#5FCB8E" : "#E2574C",
+      radiantFavoured,
+      margin,
+    };
+  }, [radiantEstimate]);
+
+  /* Короткое объяснение строится только из посчитанных пар: какие матчапы дали перевес
+     и какой герой соперника тянет вниз. Ничего додуманного. */
+  const reasons = useMemo(() => {
+    if (!verdict || matchupPairs.length === 0) return [];
+    const favoured = verdict.radiantFavoured;
+    const scored = matchupPairs.map((x) => ({
+      ...x,
+      edge: favoured ? x.wr - 0.5 : 0.5 - x.wr,
+    }));
+
+    const best = [...scored].sort((a, b) => b.edge - a.edge).slice(0, 2);
+    const worst = [...scored].sort((a, b) => a.edge - b.edge)[0];
+
+    const out = [];
+    best.forEach((b) => {
+      if (b.edge <= 0.02) return;
+      const mine = heroById(favoured ? b.r : b.d);
+      const theirs = heroById(favoured ? b.d : b.r);
+      if (mine && theirs) {
+        out.push(`${mine.localized_name} уверенно играет против ${theirs.localized_name} — ${Math.round((favoured ? b.wr : 1 - b.wr) * 100)}%`);
+      }
+    });
+    if (worst && worst.edge < -0.02) {
+      const mine = heroById(favoured ? worst.r : worst.d);
+      const theirs = heroById(favoured ? worst.d : worst.r);
+      if (mine && theirs) {
+        out.push(`Слабое место: ${mine.localized_name} против ${theirs.localized_name} — ${Math.round((favoured ? worst.wr : 1 - worst.wr) * 100)}%`);
+      }
+    }
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [verdict, matchupPairs, heroes]);
 
   function biggestThreat(myTeam, enemyTeam) {
     const myIds = myTeam.filter(Boolean);
@@ -2407,10 +2487,12 @@ function DraftTab({ heroes, onOpenCard }) {
               <span style={styles.mutedText}>Выбери героев в обеих командах</span>
             ) : (
               <>
-                <div style={styles.vsPct}>{(radiantEstimate * 100).toFixed(0)}%</div>
-                <div style={styles.mutedText}>перевес Radiant</div>
+                <div style={{ ...styles.vsPct, color: verdict.color }}>
+                  {verdict.pct}%
+                </div>
+                <div style={{ ...styles.vsWinner, color: verdict.color }}>{verdict.title}</div>
                 <div style={{ ...styles.mutedText, fontSize: 11, marginTop: 4 }}>
-                  {matchupPairs.length} / {totalPossiblePairs} пар с известной статистикой
+                  по {matchupPairs.length} парам из {totalPossiblePairs}
                 </div>
               </>
             )}
@@ -2426,6 +2508,21 @@ function DraftTab({ heroes, onOpenCard }) {
         />
       </div>
 
+      {reasons.length > 0 && (
+        <div style={styles.panel}>
+          <div style={styles.panelHeader}>
+            <Info size={16} color="#C084FC" />
+            <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Почему так</span>
+          </div>
+          {reasons.map((r, i) => (
+            <div key={i} style={styles.reasonRow}>
+              <span style={styles.patchBullet} />
+              <span>{r}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div className="two-col" style={styles.twoCol}>
         <SuggestionPanel title="Лучший пик за Radiant" color="#5FCB8E" items={suggestions("radiant")} heroById={heroById} onOpenCard={onOpenCard} />
         <SuggestionPanel title="Лучший пик за Dire" color="#E2574C" items={suggestions("dire")} heroById={heroById} onOpenCard={onOpenCard} />
@@ -2435,6 +2532,8 @@ function DraftTab({ heroes, onOpenCard }) {
         <GamePlanPanel title="План игры — Radiant" color="#5FCB8E" plan={gamePlanFor(radiant, dire)} heroById={heroById} onOpenCard={onOpenCard} />
         <GamePlanPanel title="План игры — Dire" color="#E2574C" plan={gamePlanFor(dire, radiant)} heroById={heroById} onOpenCard={onOpenCard} />
       </div>
+
+      {premium && <TimelineForecast radiant={radiant} dire={dire} heroById={heroById} />}
 
       {premium ? (
         <div style={{ ...styles.panel, border: "1px solid #4A3D1E" }}>
@@ -2475,7 +2574,7 @@ function DraftTab({ heroes, onOpenCard }) {
       ) : (
         <PremiumLock
           title="История драфтов"
-          text="Сохраняй разобранные драфты и возвращайся к ним позже. Входит в Premium — включить демо можно на вкладке «Тарифы»."
+          text="Прогноз по ходу игры (до 10, около 30 и 60+ минут) и история сохранённых драфтов. Входит в Premium — включить демо можно на вкладке «Тарифы»."
         />
       )}
 
@@ -2541,6 +2640,129 @@ function TeamPanel({ title, color, team, heroById, onSlotClick, onClear }) {
                 <Plus size={14} /> {pos.hint}
               </button>
             )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* Прогноз по минутам строится на реальной статистике: OpenDota отдаёт винрейт каждого
+   героя по длительности матча. Складываем показатели команд в трёх точках игры. */
+const durationsCache = new Map();
+
+async function getHeroDurations(heroId) {
+  if (durationsCache.has(heroId)) return durationsCache.get(heroId);
+  const cacheKey = `dw_dur_${heroId}`;
+  const cached = readLocalCache(cacheKey);
+  if (cached) {
+    durationsCache.set(heroId, cached);
+    return cached;
+  }
+  const r = await rateLimitedFetch(`https://api.opendota.com/api/heroes/${heroId}/durations`);
+  if (!r.ok) throw new Error("network");
+  const data = await r.json();
+  durationsCache.set(heroId, data);
+  try {
+    writeLocalCache(cacheKey, data);
+  } catch {
+    // quota — refetched later
+  }
+  return data;
+}
+
+const TIME_POINTS = [
+  { label: "до 10 мин", maxBin: 900, hint: "ранняя стадия" },
+  { label: "около 30 мин", minBin: 1500, maxBin: 2400, hint: "середина игры" },
+  { label: "60+ мин", minBin: 3600, hint: "затяжная игра" },
+];
+
+function TimelineForecast({ radiant, dire, heroById }) {
+  const [state, setState] = useState({ loading: false, data: null, error: null });
+  const ids = [...radiant, ...dire].filter(Boolean);
+  const key = ids.join(",");
+
+  useEffect(() => {
+    if (ids.length < 2) {
+      setState({ loading: false, data: null, error: null });
+      return;
+    }
+    let cancelled = false;
+    setState({ loading: true, data: null, error: null });
+
+    Promise.all(ids.map((id) => getHeroDurations(id).catch(() => null)))
+      .then((all) => {
+        if (cancelled) return;
+        const byHero = {};
+        ids.forEach((id, i) => (byHero[id] = all[i]));
+
+        const rows = TIME_POINTS.map((tp) => {
+          function sideRate(side) {
+            let games = 0;
+            let wins = 0;
+            side.filter(Boolean).forEach((id) => {
+              (byHero[id] || []).forEach((bin) => {
+                const b = Number(bin.duration_bin);
+                if (tp.minBin && b < tp.minBin) return;
+                if (tp.maxBin && b > tp.maxBin) return;
+                games += Number(bin.games_played) || 0;
+                wins += Number(bin.wins) || 0;
+              });
+            });
+            return games > 0 ? wins / games : null;
+          }
+          const r = sideRate(radiant);
+          const d = sideRate(dire);
+          if (r == null || d == null) return { ...tp, known: false };
+          // нормируем: чья сумма винрейтов выше в этом отрезке
+          const share = r / (r + d);
+          return { ...tp, known: true, radiantShare: share };
+        });
+
+        setState({ loading: false, data: rows, error: null });
+      })
+      .catch(() => {
+        if (!cancelled) setState({ loading: false, data: null, error: "Не удалось построить прогноз." });
+      });
+
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
+
+  if (ids.length < 2) return null;
+
+  return (
+    <div style={{ ...styles.panel, border: "1px solid #4A3D1E" }}>
+      <div style={styles.panelHeader}>
+        <Gem size={16} color="#E5B33D" />
+        <span style={{ ...styles.panelTitle, color: "#E5B33D" }}>Прогноз по ходу игры</span>
+      </div>
+
+      {state.loading && <SkeletonRows count={3} />}
+      {state.error && <div style={styles.emptyState}>{state.error}</div>}
+
+      {state.data && state.data.map((row) => {
+        if (!row.known) {
+          return (
+            <div key={row.label} style={styles.forecastRow}>
+              <span style={styles.forecastLabel}>{row.label}</span>
+              <span style={styles.mutedText}>нет данных</span>
+            </div>
+          );
+        }
+        const radiantPct = Math.round(row.radiantShare * 100);
+        const leader = radiantPct >= 50 ? "Radiant" : "Dire";
+        const leaderPct = radiantPct >= 50 ? radiantPct : 100 - radiantPct;
+        const color = Math.abs(radiantPct - 50) < 2 ? "#C084FC" : radiantPct >= 50 ? "#5FCB8E" : "#E2574C";
+        return (
+          <div key={row.label} style={styles.forecastRow}>
+            <span style={styles.forecastLabel}>{row.label}</span>
+            <div style={styles.forecastBarTrack}>
+              <div style={{ ...styles.forecastBarFill, width: `${radiantPct}%` }} />
+            </div>
+            <span style={{ ...styles.forecastValue, color }}>
+              {Math.abs(radiantPct - 50) < 2 ? "равно" : `${leader} ${leaderPct}%`}
+            </span>
           </div>
         );
       })}
@@ -3102,7 +3324,7 @@ const SCOPE_OPTIONS = [
   { key: "top48", label: "Топ-48 меты", count: 48 },
   { key: "all", label: "Все герои", count: Infinity },
 ];
-const MIN_GAMES_EDGE = 10;
+const MIN_GAMES_EDGE = 200;
 const EDGE_WINRATE_THRESHOLD = 0.55;
 
 function NodeRing({ x, y, isActive, color, dimmed, onClick }) {
@@ -3168,7 +3390,9 @@ function CounterWebTab({ heroes, onPick }) {
     setBuildProgress({ done: 0, total: selection.length });
     setActiveId(null);
 
-    const toFetch = selection.filter((h) => !matchupsCache.has(h.id) && !readLocalCache(`dw_matchups_${h.id}`));
+    // паутина строится на обычных матчах, как и остальные разделы; про-данные —
+    // запасной вариант, если источник обычных игр не ответит
+    const toFetch = selection.filter((h) => !publicMatchupsCache.has(h.id) && !matchupsCache.has(h.id));
     let failed = 0;
     if (toFetch.length) {
       const doneBase = selection.length - toFetch.length;
@@ -3180,9 +3404,13 @@ function CounterWebTab({ heroes, onPick }) {
         while (cursor < toFetch.length) {
           const h = toFetch[cursor++];
           try {
-            await getMatchups(h.id);
+            await getPublicMatchups(h.id);
           } catch {
-            failed += 1; // counted and surfaced below, not silently dropped
+            try {
+              await getMatchups(h.id);
+            } catch {
+              failed += 1; // counted and surfaced below, not silently dropped
+            }
           }
           completed += 1;
           setBuildProgress({ done: doneBase + completed, total: selection.length });
@@ -3190,13 +3418,6 @@ function CounterWebTab({ heroes, onPick }) {
       }
       await Promise.all(Array.from({ length: Math.min(CONCURRENCY, toFetch.length) }, worker));
     } else {
-      // everything already cached (memory or localStorage) — load instantly
-      selection.forEach((h) => {
-        if (!matchupsCache.has(h.id)) {
-          const cached = readLocalCache(`dw_matchups_${h.id}`);
-          if (cached) matchupsCache.set(h.id, cached);
-        }
-      });
       setBuildProgress({ done: selection.length, total: selection.length });
     }
 
@@ -3204,7 +3425,7 @@ function CounterWebTab({ heroes, onPick }) {
     const validIds = new Set(selection.map((h) => h.id));
     let noData = 0;
     selection.forEach((h) => {
-      const data = matchupsCache.get(h.id);
+      const data = publicMatchupsCache.get(h.id) || matchupsCache.get(h.id);
       if (!data) {
         noData += 1;
         return;
@@ -5014,7 +5235,17 @@ const styles = {
     background: "#0E081A", border: "1px solid #2A1A40", borderRadius: 12, padding: "20px 14px",
     textAlign: "center", boxShadow: "0 0 30px rgba(109,40,217,0.12)", width: "100%",
   },
-  vsPct: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 32, color: "#C084FC" },
+  vsPct: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 34, lineHeight: 1.1 },
+  vsWinner: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 14, marginTop: 2 },
+  forecastRow: { display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: "1px solid #241636" },
+  forecastLabel: { fontSize: 12, color: "#C4B8D8", width: 96, flexShrink: 0 },
+  forecastBarTrack: { flex: 1, height: 8, borderRadius: 4, background: "#E2574C", overflow: "hidden", minWidth: 60 },
+  forecastBarFill: { height: "100%", background: "#5FCB8E" },
+  forecastValue: {
+    fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 13, width: 96,
+    textAlign: "right", flexShrink: 0, whiteSpace: "nowrap",
+  },
+  reasonRow: { display: "flex", gap: 8, fontSize: 13, color: "#C4B8D8", lineHeight: 1.5, padding: "5px 0" },
   slotRow: { display: "flex", alignItems: "center", gap: 8, padding: "6px 0", minHeight: 32 },
   slotPos: { fontSize: 10, color: "#9C8FB0", width: 62, flexShrink: 0, textTransform: "uppercase", letterSpacing: "0.03em" },
   planLine: { padding: "10px 0", borderBottom: "1px solid #241636" },
@@ -5029,15 +5260,17 @@ const styles = {
   slotClear: { marginLeft: "auto", background: "transparent", border: "none", color: "#9C8FB0", cursor: "pointer", display: "flex" },
   pickerOverlay: {
     position: "fixed", inset: 0, background: "rgba(5,3,10,0.7)", display: "flex",
-    alignItems: "center", justifyContent: "center", zIndex: 50, padding: 20,
+    alignItems: "flex-start", justifyContent: "center", zIndex: 50, padding: "5vh 16px 16px",
   },
   pickerModal: {
-    background: "#150C24", border: "1px solid #2F1F49", borderRadius: 14, width: "min(360px, 92vw)", maxHeight: "70vh",
+    background: "#150C24", border: "1px solid #2F1F49", borderRadius: 14, width: "min(360px, 92vw)",
+    // фиксированная высота: список виден сразу, не нужно листать после открытия клавиатуры
+    height: "min(560px, 78vh)",
     display: "flex", flexDirection: "column", boxShadow: "0 20px 60px rgba(0,0,0,0.6)",
   },
   pickerHeader: { display: "flex", alignItems: "center", gap: 8, padding: "12px 14px", borderBottom: "1px solid #2F1F49" },
   pickerClose: { marginLeft: "auto", background: "transparent", border: "none", color: "#9C8FB0", cursor: "pointer", display: "flex" },
-  pickerList: { overflowY: "auto", padding: 6 },
+  pickerList: { overflowY: "auto", padding: 6, flex: 1, WebkitOverflowScrolling: "touch" },
   pickerItem: { display: "flex", alignItems: "center", gap: 6, padding: "4px 8px", borderRadius: 6 },
   pickerItemMain: { display: "flex", alignItems: "center", gap: 8, flex: 1, cursor: "pointer", padding: "5px 0" },
   starBtn: { background: "transparent", border: "none", cursor: "pointer", display: "flex", padding: 6 },
