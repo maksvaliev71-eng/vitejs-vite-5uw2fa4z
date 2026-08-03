@@ -1,5 +1,8 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { BarChart, Bar, LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
+import {
+  BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
+  XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
+} from "recharts";
 import {
   Search, Swords, TrendingUp, TrendingDown, Loader2, Info,
   ChevronDown, ArrowUpDown, ZoomIn, ZoomOut, RotateCcw,
@@ -230,16 +233,29 @@ function useMatchups(heroId, source = "public") {
     const load = source === "pro" ? getMatchups(heroId) : getPublicMatchups(heroId);
     load
       .then((data) => {
-        if (!cancelled) setState({ loading: false, data, error: null });
+        if (!cancelled) setState({ loading: false, data, error: null, fellBack: false });
       })
       .catch((e) => {
-        if (!cancelled) {
-          setState({
-            loading: false,
-            data: null,
-            error: `Не удалось загрузить матчапы${e && e.detail ? `: ${e.detail}` : ""}`,
-          });
+        // if the public source isn't available yet, show pro data rather than an empty table
+        if (source === "pro") {
+          if (!cancelled) {
+            setState({ loading: false, data: null, error: "Не удалось загрузить матчапы." });
+          }
+          return;
         }
+        getMatchups(heroId)
+          .then((data) => {
+            if (!cancelled) setState({ loading: false, data, error: null, fellBack: true });
+          })
+          .catch(() => {
+            if (!cancelled) {
+              setState({
+                loading: false,
+                data: null,
+                error: `Не удалось загрузить матчапы${e && e.detail ? `: ${e.detail}` : ""}`,
+              });
+            }
+          });
       });
 
     return () => {
@@ -1365,6 +1381,8 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
             </div>
           </div>
 
+          <ProfileCharts matches={data.matches} wl={data.wl} />
+
           {monthlyTrend.length > 0 && (
             <div style={styles.panel}>
               <div style={styles.panelHeader}>
@@ -1420,6 +1438,219 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
         </>
       )}
     </div>
+  );
+}
+
+const WEEKDAY_RU = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
+
+function ProfileCharts({ matches, wl }) {
+  const stats = useMemo(() => {
+    const list = Array.isArray(matches) ? matches.filter((m) => m.player_slot != null && m.radiant_win != null) : [];
+    if (list.length === 0) return null;
+
+    const won = (m) => (m.player_slot < 128) === m.radiant_win;
+
+    let kills = 0, deaths = 0, assists = 0, gpm = 0, xpm = 0, lh = 0, durationSum = 0;
+    const byWeekday = WEEKDAY_RU.map((d) => ({ day: d, games: 0, wins: 0 }));
+    const buckets = [
+      { label: "<25 мин", max: 25 * 60, games: 0, wins: 0 },
+      { label: "25–35", max: 35 * 60, games: 0, wins: 0 },
+      { label: "35–45", max: 45 * 60, games: 0, wins: 0 },
+      { label: "45+", max: Infinity, games: 0, wins: 0 },
+    ];
+
+    list.forEach((m) => {
+      const w = won(m);
+      kills += m.kills || 0;
+      deaths += m.deaths || 0;
+      assists += m.assists || 0;
+      gpm += m.gold_per_min || 0;
+      xpm += m.xp_per_min || 0;
+      lh += m.last_hits || 0;
+      durationSum += m.duration || 0;
+
+      if (m.start_time) {
+        const d = new Date(m.start_time * 1000).getDay();
+        byWeekday[d].games += 1;
+        if (w) byWeekday[d].wins += 1;
+      }
+      const b = buckets.find((x) => (m.duration || 0) < x.max);
+      if (b) {
+        b.games += 1;
+        if (w) b.wins += 1;
+      }
+    });
+
+    // longest streaks, oldest match first
+    const chrono = [...list].sort((a, b) => (a.start_time || 0) - (b.start_time || 0));
+    let bestWin = 0, bestLose = 0, curWin = 0, curLose = 0;
+    chrono.forEach((m) => {
+      if (won(m)) {
+        curWin += 1; curLose = 0;
+        if (curWin > bestWin) bestWin = curWin;
+      } else {
+        curLose += 1; curWin = 0;
+        if (curLose > bestLose) bestLose = curLose;
+      }
+    });
+
+    const n = list.length;
+    return {
+      n,
+      kda: deaths > 0 ? ((kills + assists) / deaths).toFixed(2) : "—",
+      avgKills: (kills / n).toFixed(1),
+      avgDeaths: (deaths / n).toFixed(1),
+      avgAssists: (assists / n).toFixed(1),
+      avgGpm: Math.round(gpm / n),
+      avgXpm: Math.round(xpm / n),
+      avgLh: Math.round(lh / n),
+      avgDuration: Math.round(durationSum / n / 60),
+      bestWin,
+      bestLose,
+      weekday: byWeekday
+        .filter((d) => d.games >= 2)
+        .map((d) => ({ day: d.day, winRate: Math.round((d.wins / d.games) * 1000) / 10, games: d.games })),
+      duration: buckets
+        .filter((b) => b.games >= 2)
+        .map((b) => ({ label: b.label, winRate: Math.round((b.wins / b.games) * 1000) / 10, games: b.games })),
+    };
+  }, [matches]);
+
+  if (!stats) return null;
+
+  const wins = wl?.win || 0;
+  const losses = wl?.lose || 0;
+  const pie = [
+    { name: "Победы", value: wins, color: "#5FCB8E" },
+    { name: "Поражения", value: losses, color: "#E2574C" },
+  ];
+  const total = wins + losses;
+
+  return (
+    <>
+      <div className="two-col" style={styles.twoCol}>
+        <div style={styles.panel}>
+          <div style={styles.panelHeader}>
+            <BarChart3 size={16} color="#B24BF3" />
+            <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Победы и поражения</span>
+          </div>
+          {total > 0 ? (
+            <div style={{ position: "relative", width: "100%", height: 200 }}>
+              <ResponsiveContainer>
+                <PieChart>
+                  <Pie
+                    data={pie}
+                    dataKey="value"
+                    innerRadius={58}
+                    outerRadius={82}
+                    paddingAngle={2}
+                    stroke="none"
+                  >
+                    {pie.map((p) => <Cell key={p.name} fill={p.color} />)}
+                  </Pie>
+                  <Tooltip
+                    contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 8, fontSize: 12 }}
+                  />
+                </PieChart>
+              </ResponsiveContainer>
+              <div style={styles.donutCenter}>
+                <div style={styles.donutValue}>{((wins / total) * 100).toFixed(1)}%</div>
+                <div style={{ ...styles.mutedText, fontSize: 11 }}>{wins}П / {losses}П</div>
+              </div>
+            </div>
+          ) : (
+            <div style={styles.emptyState}>Нет данных о матчах.</div>
+          )}
+        </div>
+
+        <div style={styles.panel}>
+          <div style={styles.panelHeader}>
+            <Gem size={16} color="#B24BF3" />
+            <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Средние показатели</span>
+          </div>
+          <div style={styles.statsGrid}>
+            <Stat label="KDA" value={stats.kda} />
+            <Stat label="Убийства" value={stats.avgKills} />
+            <Stat label="Смерти" value={stats.avgDeaths} />
+            <Stat label="Помощь" value={stats.avgAssists} />
+            <Stat label="Золото/мин" value={stats.avgGpm} />
+            <Stat label="Опыт/мин" value={stats.avgXpm} />
+            <Stat label="Добито" value={stats.avgLh} />
+            <Stat label="Длина игры" value={`${stats.avgDuration} мин`} />
+          </div>
+          <div style={styles.streakRow}>
+            <span style={{ ...styles.streakChip, borderColor: "#5FCB8E", color: "#5FCB8E" }}>
+              Серия побед: {stats.bestWin}
+            </span>
+            <span style={{ ...styles.streakChip, borderColor: "#E2574C", color: "#E2574C" }}>
+              Серия поражений: {stats.bestLose}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <div className="two-col" style={styles.twoCol}>
+        <div style={styles.panel}>
+          <div style={styles.panelHeader}>
+            <BarChart3 size={16} color="#B24BF3" />
+            <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Винрейт по дням недели</span>
+          </div>
+          {stats.weekday.length === 0 ? (
+            <div style={styles.emptyState}>Мало данных.</div>
+          ) : (
+            <div style={{ width: "100%", height: 200 }}>
+              <ResponsiveContainer>
+                <BarChart data={stats.weekday} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#2A1A40" vertical={false} />
+                  <XAxis dataKey="day" tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={{ stroke: "#2A1A40" }} tickLine={false} />
+                  <YAxis domain={[0, 100]} tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={false} tickLine={false} unit="%" />
+                  <Tooltip
+                    contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 8, fontSize: 12 }}
+                    labelStyle={{ color: "#F2EAFB" }}
+                    formatter={(v, n, p) => [`${v}% (${p.payload.games} игр)`, "Винрейт"]}
+                  />
+                  <Bar dataKey="winRate" radius={[4, 4, 0, 0]}>
+                    {stats.weekday.map((d) => (
+                      <Cell key={d.day} fill={d.winRate >= 50 ? "#5FCB8E" : "#E2574C"} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </div>
+
+        <div style={styles.panel}>
+          <div style={styles.panelHeader}>
+            <BarChart3 size={16} color="#B24BF3" />
+            <span style={{ ...styles.panelTitle, color: "#B24BF3" }}>Винрейт по длине игры</span>
+          </div>
+          {stats.duration.length === 0 ? (
+            <div style={styles.emptyState}>Мало данных.</div>
+          ) : (
+            <div style={{ width: "100%", height: 200 }}>
+              <ResponsiveContainer>
+                <BarChart data={stats.duration} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#2A1A40" vertical={false} />
+                  <XAxis dataKey="label" tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={{ stroke: "#2A1A40" }} tickLine={false} />
+                  <YAxis domain={[0, 100]} tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={false} tickLine={false} unit="%" />
+                  <Tooltip
+                    contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 8, fontSize: 12 }}
+                    labelStyle={{ color: "#F2EAFB" }}
+                    formatter={(v, n, p) => [`${v}% (${p.payload.games} игр)`, "Винрейт"]}
+                  />
+                  <Bar dataKey="winRate" radius={[4, 4, 0, 0]}>
+                    {stats.duration.map((d) => (
+                      <Cell key={d.label} fill={d.winRate >= 50 ? "#5FCB8E" : "#E2574C"} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -2494,7 +2725,7 @@ function CounterTableTab({ heroes, selected, selectedId, setSelectedId }) {
   const [direction, setDirection] = useState("counters");
   const [sortDesc, setSortDesc] = useState(true);
   const [source, setSource] = useState("public");
-  const { data: matchups, loading, error } = useMatchups(selectedId, source);
+  const { data: matchups, loading, error, fellBack } = useMatchups(selectedId, source);
 
   const heroById = (id) => heroes.find((h) => h.id === id);
 
@@ -2584,6 +2815,12 @@ function CounterTableTab({ heroes, selected, selectedId, setSelectedId }) {
           Про-сцена
         </button>
       </div>
+
+      {fellBack && (
+        <div style={{ ...styles.mutedText, fontSize: 12 }}>
+          Обычные матчи пока недоступны — показаны данные про-сцены.
+        </div>
+      )}
 
       <div className="toolbar" style={styles.toolbar}>
         <div style={styles.segment}>
@@ -3539,18 +3776,28 @@ function ReferenceTab({ heroes }) {
         </button>
       </div>
 
-      {lang === "ru" && locale.loading && (
-        <div style={{ ...styles.mutedText, fontSize: 12 }}>Загружаю русскую локализацию Valve (один раз, файл большой)…</div>
-      )}
-      {lang === "ru" && locale.failed && !steamRu && (
-        <div style={styles.localeError}>
-          <div>Русская локализация не загрузилась — показаны оригинальные названия.</div>
+      {lang === "ru" && (
+        <div style={locale.failed ? styles.localeError : styles.localeStatus}>
+          <div>
+            {locale.loading && "Загружаю русскую локализацию…"}
+            {!locale.loading && locale.data &&
+              `Способности: загружено ${Object.keys(locale.data).length} строк`}
+            {!locale.loading && !locale.data && !locale.failed && "Локализация не запрашивалась"}
+            {locale.failed && "Способности: не загрузились, показаны оригинальные названия"}
+          </div>
+          <div style={{ marginTop: 4 }}>
+            {steamRu
+              ? `Предметы и герои: загружено ${Object.keys(steamRu.items || {}).length} названий`
+              : "Предметы и герои: не загрузились (проверь /api/ru-names)"}
+          </div>
           {locale.tried && locale.tried.length > 0 && (
             <div style={styles.localeTried}>
               {locale.tried.map((t, i) => <div key={i}>{t}</div>)}
             </div>
           )}
-          <button style={{ ...styles.tourGo, marginTop: 8 }} onClick={selectRu}>Повторить</button>
+          {(locale.failed || !steamRu) && (
+            <button style={{ ...styles.tourGo, marginTop: 8 }} onClick={selectRu}>Повторить</button>
+          )}
         </div>
       )}
 
@@ -4222,6 +4469,10 @@ const styles = {
     width: 4, height: 4, borderRadius: "50%", background: "#6E5F86", flexShrink: 0, marginTop: 7,
   },
   langDivider: { width: 1, background: "#2F1F49", margin: "2px 4px" },
+  localeStatus: {
+    background: "#0E081A", border: "1px solid #2C1C42", borderRadius: 10, padding: 12,
+    fontSize: 12, color: "#9C8FB0",
+  },
   localeError: {
     background: "#1F1518", border: "1px solid #5A2430", borderRadius: 10, padding: 12,
     fontSize: 12, color: "#F0D9DC",
@@ -4504,6 +4755,15 @@ const styles = {
   },
   profileHeader: { display: "flex", alignItems: "center", gap: 14 },
   profileAvatar: { width: 56, height: 56, borderRadius: 12, border: "2px solid #B24BF3" },
+  donutCenter: {
+    position: "absolute", inset: 0, display: "flex", flexDirection: "column",
+    alignItems: "center", justifyContent: "center", pointerEvents: "none",
+  },
+  donutValue: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 26, color: "#F2EAFB" },
+  streakRow: { display: "flex", gap: 8, flexWrap: "wrap", marginTop: 14 },
+  streakChip: {
+    fontSize: 11, padding: "5px 11px", borderRadius: 999, border: "1px solid", fontWeight: 600,
+  },
   profileName: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 18 },
   roleGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 16 },
   banGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 4, columnGap: 24 },
