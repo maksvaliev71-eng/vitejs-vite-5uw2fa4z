@@ -255,7 +255,14 @@ function useMatchups(heroId, source = "public", refreshKey = 0) {
         getMatchups(heroId)
           .then((data) => {
             if (!cancelled) {
-              setState({ loading: false, data, error: null, fellBack: true, meta: matchupsMeta.get(heroId) || null });
+              setState({
+                loading: false,
+                data,
+                error: null,
+                fellBack: true,
+                fallbackReason: e && e.detail ? String(e.detail) : null,
+                meta: matchupsMeta.get(heroId) || null,
+              });
             }
           })
           .catch(() => {
@@ -728,8 +735,10 @@ async function fetchPlayerBundle(accountId) {
     // gpm/xpm/last_hits/lane_role приходят только если запросить их явно
     fetch(
       `https://api.opendota.com/api/players/${accountId}/matches?limit=300` +
+        "&project=kills&project=deaths&project=assists" +
         "&project=gold_per_min&project=xp_per_min&project=last_hits" +
-        "&project=lane_role&project=duration&project=hero_damage&project=tower_damage"
+        "&project=lane_role&project=duration&project=hero_damage&project=tower_damage" +
+        "&project=hero_id&project=start_time&project=radiant_win&project=player_slot"
     ),
     fetch(`https://api.opendota.com/api/players/${accountId}/peers`),
   ]);
@@ -2275,8 +2284,10 @@ function LaneRoleChart({ heroId }) {
 
 /* Числа «докручиваются» от нуля при появлении. Нечисловые значения показываются как есть. */
 function useCountUp(value, duration = 700) {
-  const numeric = typeof value === "number" ? value : Number(String(value).replace(/[^\d.,-]/g, "").replace(",", "."));
-  const isNumber = Number.isFinite(numeric) && String(value).trim() !== "";
+  const raw = String(value);
+  const hasDigit = /\d/.test(raw);
+  const numeric = typeof value === "number" ? value : Number(raw.replace(/[^\d.,-]/g, "").replace(",", "."));
+  const isNumber = hasDigit && Number.isFinite(numeric);
   const [shown, setShown] = useState(isNumber ? 0 : null);
 
   useEffect(() => {
@@ -3375,7 +3386,7 @@ function CounterTableTab({ heroes, selected, selectedId, setSelectedId }) {
   const [sortDesc, setSortDesc] = useState(true);
   const [source, setSource] = useState("public");
   const [refreshKey, setRefreshKey] = useState(0);
-  const { data: matchups, loading, error, fellBack, meta } = useMatchups(selectedId, source, refreshKey);
+  const { data: matchups, loading, error, fellBack, fallbackReason, meta } = useMatchups(selectedId, source, refreshKey);
 
   const heroById = (id) => heroes.find((h) => h.id === id);
 
@@ -3483,7 +3494,7 @@ function CounterTableTab({ heroes, selected, selectedId, setSelectedId }) {
         <span style={styles.sourceDot} />
         <span>
           {fellBack
-            ? "Обычные матчи недоступны — показаны данные про-сцены"
+            ? `Обычные матчи недоступны — показаны данные про-сцены${fallbackReason ? `: ${fallbackReason}` : ""}`
             : meta && meta.source === "pro"
             ? "Про-матчи"
             : `Обычные матчи${meta && meta.scope ? ` · ${meta.scope}` : ""}`}
