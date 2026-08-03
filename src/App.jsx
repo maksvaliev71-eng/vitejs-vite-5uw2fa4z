@@ -544,43 +544,60 @@ async function getLatestPatch() {
    public match the hero appears in and count wins per enemy. Heavier and slower than the
    pro endpoint, hence the explicit toggle and long cache. */
 async function getPublicMatchups(heroId) {
-  const patch = await getLatestPatch();
-  const cacheKey = `dw_pubmatch_${heroId}_${patch.name}`;
+  const cacheKey = `dw_pubmatch_v2_${heroId}`;
   const cached = readLocalCache(cacheKey, CACHE_TTL_MS * 4);
   if (cached) return cached;
 
+  // Scanning every public match since the patch times out on Explorer, so this looks at a
+  // recent window and caps the scan. Fewer games, but they are ordinary ranked matches.
   const sql = `
     WITH mine AS (
       SELECT
         radiant_win,
-        ${heroId} = ANY(string_to_array(radiant_team, ',')::int[]) AS on_radiant,
-        CASE WHEN ${heroId} = ANY(string_to_array(radiant_team, ',')::int[])
-             THEN string_to_array(dire_team, ',')::int[]
-             ELSE string_to_array(radiant_team, ',')::int[] END AS enemies
+        ${heroId} = ANY(radiant_team) AS on_radiant,
+        CASE WHEN ${heroId} = ANY(radiant_team) THEN dire_team ELSE radiant_team END AS enemies
       FROM public_matches
-      WHERE start_time >= ${patch.ts}
-        AND (${heroId} = ANY(string_to_array(radiant_team, ',')::int[])
-          OR ${heroId} = ANY(string_to_array(dire_team, ',')::int[]))
+      WHERE start_time >= extract(epoch FROM now() - interval '7 days')
+        AND (${heroId} = ANY(radiant_team) OR ${heroId} = ANY(dire_team))
+      LIMIT 40000
     )
-    SELECT
-      enemy AS hero_id,
-      COUNT(*) AS games_played,
-      SUM(CASE WHEN on_radiant = radiant_win THEN 1 ELSE 0 END) AS wins
+    SELECT enemy AS hero_id,
+           COUNT(*) AS games_played,
+           SUM(CASE WHEN on_radiant = radiant_win THEN 1 ELSE 0 END) AS wins
     FROM mine, unnest(enemies) AS enemy
     GROUP BY enemy
-    HAVING COUNT(*) >= 50
+    HAVING COUNT(*) >= 30
     ORDER BY enemy
   `.replace(/\s+/g, " ").trim();
 
   const r = await rateLimitedFetch(`https://api.opendota.com/api/explorer?sql=${encodeURIComponent(sql)}`);
-  if (!r.ok) throw new Error("network");
-  const json = await r.json();
-  if (!json.rows || json.rows.length === 0) throw new Error("no rows");
-  const data = json.rows.map((row) => ({
-    hero_id: Number(row.hero_id),
-    games_played: Number(row.games_played) || 0,
-    wins: Number(row.wins) || 0,
-  }));
+  const json = await r.json().catch(() => null);
+
+  // Explorer answers 200 with an "err" field on SQL problems — surface it instead of a blank failure
+  if (json && json.err) {
+    const e = new Error("sql");
+    e.detail = String(json.err).slice(0, 300);
+    throw e;
+  }
+  if (!r.ok) {
+    const e = new Error("http");
+    e.detail = `HTTP ${r.status}`;
+    throw e;
+  }
+  if (!json || !json.rows || json.rows.length === 0) {
+    const e = new Error("empty");
+    e.detail = "запрос вернул пустой результат";
+    throw e;
+  }
+
+  const data = json.rows
+    .map((row) => ({
+      hero_id: Number(row.hero_id),
+      games_played: Number(row.games_played) || 0,
+      wins: Number(row.wins) || 0,
+    }))
+    .filter((d) => d.hero_id && d.hero_id !== heroId);
+
   try {
     writeLocalCache(cacheKey, data);
   } catch {
@@ -602,8 +619,14 @@ function usePublicMatchups(heroId, enabled) {
       .then((data) => {
         if (!cancelled) setState({ loading: false, data, error: null });
       })
-      .catch(() => {
-        if (!cancelled) setState({ loading: false, data: null, error: "Не удалось посчитать по обычным матчам." });
+      .catch((e) => {
+        if (!cancelled) {
+          setState({
+            loading: false,
+            data: null,
+            error: `Не удалось посчитать по обычным матчам${e && e.detail ? `: ${e.detail}` : ""}`,
+          });
+        }
       });
     return () => { cancelled = true; };
   }, [heroId, enabled]);
@@ -992,7 +1015,7 @@ export default function App() {
 
       {!loading && !error && selected && (
         <div key={tab} className="tab-content">
-          {tab === "home" && <HomeTab heroes={heroes} setTab={setTab} />}
+          {tab === "home" && <HomeTab heroes={heroes} setTab={setTab} onOpenHero={(id) => { setSelectedId(id); setTab("card"); }} />}
           {tab === "card" && (
             <HeroCardTab
               heroes={heroes}
@@ -1121,13 +1144,6 @@ function PageMenu({ tab, setTab }) {
 
 /* ---------- home / landing tab ---------- */
 
-const HOME_CARDS = [
-  { key: "card", title: "Карточка героя", desc: "Статы, роли и матчапы одного героя", icon: IdCard },
-  { key: "table", title: "Таблица контрпиков", desc: "Кто кого контрит и насколько сильно", icon: Table2 },
-  { key: "web", title: "Паутина", desc: "Все контрпики на одном интерактивном графе", icon: Network },
-  { key: "roles", title: "Топ по ролям", desc: "Лучшие герои по позициям и рангам", icon: Crown },
-  { key: "draft", title: "Драфт 5×5", desc: "Собери команды и получи рекомендацию пика", icon: Users },
-];
 
 function HexVisual() {
   const nodes = useMemo(() => {
@@ -1173,7 +1189,54 @@ function HexVisual() {
   );
 }
 
-function HomeTab({ heroes, setTab }) {
+function HomeTab({ heroes, setTab, onOpenHero }) {
+  const [query, setQuery] = useState("");
+  const [patch, setPatch] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getLatestPatch()
+      .then((p) => { if (!cancelled) setPatch(p); })
+      .catch(() => { /* patch label is decorative here */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  const matches = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    return heroes.filter((h) => h.localized_name.toLowerCase().includes(q)).slice(0, 6);
+  }, [heroes, query]);
+
+  const topMeta = useMemo(() => {
+    return heroes
+      .map((h) => {
+        const s = bracketStats(h, BRACKETS[0]);
+        return { hero: h, picks: s.picks, winRate: s.picks ? s.wins / s.picks : 0 };
+      })
+      .filter((x) => x.picks >= 5000)
+      .sort((a, b) => b.winRate - a.winRate)
+      .slice(0, 5);
+  }, [heroes]);
+
+  const topPicked = useMemo(() => {
+    return heroes
+      .map((h) => {
+        const s = bracketStats(h, BRACKETS[0]);
+        return { hero: h, picks: s.picks, winRate: s.picks ? s.wins / s.picks : 0 };
+      })
+      .sort((a, b) => b.picks - a.picks)
+      .slice(0, 5);
+  }, [heroes]);
+
+  const topBanned = useMemo(() => {
+    return [...heroes].filter((h) => h.pro_ban).sort((a, b) => b.pro_ban - a.pro_ban).slice(0, 5);
+  }, [heroes]);
+
+  function openHero(id) {
+    setQuery("");
+    onOpenHero(id);
+  }
+
   return (
     <div style={styles.homeWrap}>
       <div className="home-hero" style={styles.homeHero}>
@@ -1182,12 +1245,39 @@ function HomeTab({ heroes, setTab }) {
         <div className="home-text-col" style={styles.homeTextCol}>
           <h1 style={styles.homeTitle}>DraftHex</h1>
           <p style={styles.homeTagline}>
-            Реальная статистика OpenDota вместо догадок: контрпики, драфт 5×5 и мета — на живых данных,
-            без выдуманных советов.
+            Контрпики, драфт и мета Dota 2 на живой статистике обычных матчей.
           </p>
-          <button className="btn-lift" style={styles.homeCta} onClick={() => setTab("card")}>
-            Начать <ArrowRight size={16} />
-          </button>
+
+          <div style={styles.homeSearchWrap}>
+            <Search size={16} color="#9C8FB0" />
+            <input
+              style={styles.homeSearchInput}
+              placeholder="Введи героя — откроется его карточка"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && matches.length) openHero(matches[0].id);
+                if (e.key === "Escape") setQuery("");
+              }}
+            />
+          </div>
+
+          {matches.length > 0 && (
+            <div style={styles.homeSearchResults}>
+              {matches.map((h) => (
+                <div key={h.id} style={styles.dropdownItem} onClick={() => openHero(h.id)}>
+                  <HeroIcon hero={h} style={styles.dropdownIcon} />
+                  <span style={{ fontSize: 13 }}>{h.localized_name}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {patch && (
+            <div style={styles.patchChip}>
+              <History size={12} color="#C084FC" /> Текущий патч {patch.name}
+            </div>
+          )}
         </div>
 
         <div className="hero-portrait-wrap" style={styles.homePortraitWrap}>
@@ -1196,19 +1286,59 @@ function HomeTab({ heroes, setTab }) {
       </div>
 
       <div style={styles.homeGrid}>
-        {HOME_CARDS.map((c) => {
-          const Icon = c.icon;
-          return (
-            <button key={c.key} className="home-card" style={styles.homeCard} onClick={() => setTab(c.key)}>
-              <div style={styles.homeCardIconBadge}>
-                <Icon size={20} color="#C084FC" />
-              </div>
-              <div style={styles.homeCardTitle}>{c.title}</div>
-              <div style={styles.homeCardDesc}>{c.desc}</div>
-            </button>
-          );
-        })}
+        <DashCard
+          title="Лучший винрейт"
+          icon={TrendingUp}
+          color="#5FCB8E"
+          rows={topMeta.map((x) => ({ hero: x.hero, value: `${(x.winRate * 100).toFixed(1)}%` }))}
+          onOpenHero={openHero}
+        />
+        <DashCard
+          title="Чаще всего берут"
+          icon={Crown}
+          color="#B24BF3"
+          rows={topPicked.map((x) => ({
+            hero: x.hero,
+            value: x.picks > 1000 ? `${Math.round(x.picks / 1000)}k` : String(x.picks),
+          }))}
+          onOpenHero={openHero}
+        />
+        <DashCard
+          title="Чаще всего банят"
+          icon={Swords}
+          color="#E2574C"
+          rows={topBanned.map((h) => ({ hero: h, value: String(h.pro_ban) }))}
+          onOpenHero={openHero}
+        />
       </div>
+
+      <div style={styles.homeActions}>
+        <button className="btn-lift" style={styles.homeCta} onClick={() => setTab("draft")}>
+          Собрать драфт <ArrowRight size={16} />
+        </button>
+        <button style={styles.homeSecondary} onClick={() => setTab("web")}>Паутина контрпиков</button>
+        <button style={styles.homeSecondary} onClick={() => setTab("profile")}>Мой профиль</button>
+      </div>
+    </div>
+  );
+}
+
+function DashCard({ title, icon: Icon, color, rows, onOpenHero }) {
+  return (
+    <div style={styles.panel}>
+      <div style={styles.panelHeader}>
+        <Icon size={16} color={color} />
+        <span style={{ ...styles.panelTitle, color }}>{title}</span>
+      </div>
+      {rows.length === 0 && <SkeletonRows count={4} />}
+      {rows.map(({ hero, value }, i) => (
+        <div key={hero.id} className="role-row" style={styles.roleRow} onClick={() => onOpenHero(hero.id)}>
+          <span style={styles.roleRank}>{i + 1}</span>
+          <HeroIcon hero={hero} style={styles.matchupIcon} />
+          <span style={styles.matchupName}>{hero.localized_name}</span>
+          <span style={{ ...styles.rolePct, color }}>{value}</span>
+        </div>
+      ))}
     </div>
   );
 }
@@ -1229,6 +1359,15 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
       setAccountId(id);
       setInput(steamIdFromUrl);
     }
+    checkServerPremium(steamIdFromUrl).then((res) => {
+      if (!res) return;
+      try {
+        if (res.premium) localStorage.setItem("dw_premium_paid", "1");
+        else localStorage.removeItem("dw_premium_paid");
+      } catch {
+        // storage unavailable — premium just won't persist between visits
+      }
+    });
   }, [steamIdFromUrl]);
 
   const heroById = (id) => heroes.find((h) => h.id === id);
@@ -2446,7 +2585,7 @@ function CounterTableTab({ heroes, selected, selectedId, setSelectedId }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [heroQuery, setHeroQuery] = useState("");
   const [search, setSearch] = useState("");
-  const [minGames, setMinGames] = useState(100);
+  const [minGames, setMinGames] = useState(30);
   const [direction, setDirection] = useState("counters");
   const [sortDesc, setSortDesc] = useState(true);
   const [source, setSource] = useState("public");
@@ -2576,7 +2715,7 @@ function CounterTableTab({ heroes, selected, selectedId, setSelectedId }) {
           <label style={styles.gamesLabel}>
             Мин. игр: {minGames}
             <input
-              type="range" min="10" max={source === "public" ? 2000 : 200} step={source === "public" ? 50 : 10} value={minGames}
+              type="range" min="10" max={source === "public" ? 500 : 200} step={10} value={minGames}
               onChange={(e) => setMinGames(Number(e.target.value))}
               style={styles.slider}
             />
@@ -3099,10 +3238,25 @@ function CounterWebTab({ heroes, onPick }) {
 
 /* No payment provider is wired up yet, so this is a local demo flag: it lets the premium
    sections be built and reviewed without pretending a purchase happened. */
+/* Server-checked subscription, tied to the Steam id from login. Falls back to the local
+   demo flag while no payment provider is connected. */
+async function checkServerPremium(steamId64) {
+  if (!steamId64) return null;
+  try {
+    const r = await fetch(`/api/premium-status?steamid=${encodeURIComponent(steamId64)}`);
+    if (!r.ok) return null;
+    const data = await r.json();
+    if (data.reason === "storage_not_configured") return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
 function usePremium() {
   const [premium, setPremium] = useState(() => {
     try {
-      return localStorage.getItem("dw_premium_demo") === "1";
+      return localStorage.getItem("dw_premium_demo") === "1" || localStorage.getItem("dw_premium_paid") === "1";
     } catch {
       return false;
     }
@@ -4297,7 +4451,29 @@ const styles = {
     fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 15, padding: "12px 26px",
     borderRadius: 999, cursor: "pointer", boxShadow: "0 0 24px rgba(178,75,243,0.5)",
   },
-  homeGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 16 },
+  homeGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 16 },
+  homeSearchWrap: {
+    display: "flex", alignItems: "center", gap: 10, marginTop: 18, background: "#140B22",
+    border: "1px solid #2F1F49", borderRadius: 999, padding: "12px 18px", maxWidth: 420,
+  },
+  homeSearchInput: {
+    background: "transparent", border: "none", outline: "none", color: "#F2EAFB",
+    fontSize: 14, width: "100%", fontFamily: "'Inter', sans-serif",
+  },
+  homeSearchResults: {
+    marginTop: 8, background: "#150C24", border: "1px solid #2F1F49", borderRadius: 12,
+    padding: 6, maxWidth: 420,
+  },
+  patchChip: {
+    display: "inline-flex", alignItems: "center", gap: 6, marginTop: 14, fontSize: 12,
+    color: "#C9BEDD", background: "#0E081A", border: "1px solid #2C1C42", borderRadius: 999,
+    padding: "6px 12px",
+  },
+  homeActions: { display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" },
+  homeSecondary: {
+    background: "transparent", border: "1px solid #3A2857", color: "#C9BEDD",
+    fontSize: 13, padding: "11px 18px", borderRadius: 999, cursor: "pointer",
+  },
   homeCard: {
     position: "relative", display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 10, textAlign: "left",
     background: "linear-gradient(160deg, #170D28, #120A1E)", border: "1px solid #2F1F49", borderRadius: 14, padding: 20,
