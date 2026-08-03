@@ -288,8 +288,20 @@ async function getRuLocale() {
     return cached;
   }
   ruLocalePromise = (async () => {
-    // parsing happens on the server now — the browser only pulls a small cached JSON
-    const r = await fetch("/api/ru-abilities");
+    // parsing happens on the server now — the browser only pulls a small cached JSON.
+    // A hard timeout keeps a slow first request from looking like an infinite spinner.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 45000);
+    let r;
+    try {
+      r = await fetch("/api/ru-abilities", { signal: controller.signal });
+    } catch (e) {
+      clearTimeout(timer);
+      const err = new Error("locale request failed");
+      err.tried = [e && e.name === "AbortError" ? "превышено время ожидания (45 с)" : "сеть недоступна"];
+      throw err;
+    }
+    clearTimeout(timer);
     if (!r.ok) {
       let detail = `HTTP ${r.status}`;
       try {
@@ -495,16 +507,16 @@ async function getPublicMatchups(heroId) {
              ${heroId} = ANY(radiant_team) AS on_radiant,
              CASE WHEN ${heroId} = ANY(radiant_team) THEN dire_team ELSE radiant_team END AS enemies
       FROM public_matches
-      WHERE start_time >= extract(epoch FROM now() - interval '2 days')
+      WHERE start_time >= extract(epoch FROM now() - interval '12 hours')
         AND (${heroId} = ANY(radiant_team) OR ${heroId} = ANY(dire_team))
-      LIMIT 4000
+      LIMIT 1200
     )
     SELECT enemy AS hero_id,
            COUNT(*) AS games_played,
            SUM(CASE WHEN on_radiant = radiant_win THEN 1 ELSE 0 END) AS wins
     FROM mine, unnest(enemies) AS enemy
     GROUP BY enemy
-    HAVING COUNT(*) >= 10
+    HAVING COUNT(*) >= 5
     ORDER BY enemy
   `.replace(/\s+/g, " ").trim();
 
