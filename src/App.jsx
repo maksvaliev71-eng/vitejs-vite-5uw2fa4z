@@ -181,30 +181,71 @@ async function getMatchups(heroId) {
   return data;
 }
 
-function useMatchups(heroId) {
+/* Matchups from ordinary public games, via STRATZ (our backend holds the token).
+   OpenDota's endpoint only covers pro matches, which is a tiny and unrepresentative
+   sample, so public is the default everywhere and pro is an explicit choice. */
+const publicMatchupsCache = new Map();
+
+async function getPublicMatchups(heroId) {
+  if (publicMatchupsCache.has(heroId)) return publicMatchupsCache.get(heroId);
+  const cacheKey = `dw_stratz_mu_${heroId}`;
+  const cached = readLocalCache(cacheKey, CACHE_TTL_MS);
+  if (cached) {
+    publicMatchupsCache.set(heroId, cached);
+    return cached;
+  }
+
+  const r = await fetch(`/api/stratz-matchups?heroId=${heroId}`);
+  const json = await r.json().catch(() => null);
+  if (!r.ok || !json || !json.rows) {
+    const err = new Error("stratz failed");
+    err.detail = json && (json.detail || json.error) ? String(json.detail || json.error) : `HTTP ${r.status}`;
+    throw err;
+  }
+
+  publicMatchupsCache.set(heroId, json.rows);
+  try {
+    writeLocalCache(cacheKey, json.rows);
+  } catch {
+    // quota — refetched next session, backend still caches it
+  }
+  return json.rows;
+}
+
+/* source: "public" (STRATZ, ordinary games) or "pro" (OpenDota pro matches) */
+function useMatchups(heroId, source = "public") {
   const [state, setState] = useState({ loading: false, data: null, error: null });
   useEffect(() => {
     if (!heroId) return;
-    if (matchupsCache.has(heroId)) {
-      setState({ loading: false, data: matchupsCache.get(heroId), error: null });
+
+    const memCache = source === "pro" ? matchupsCache : publicMatchupsCache;
+    if (memCache.has(heroId)) {
+      setState({ loading: false, data: memCache.get(heroId), error: null });
       return;
     }
+
     let cancelled = false;
     setState({ loading: true, data: null, error: null });
-    getMatchups(heroId)
+
+    const load = source === "pro" ? getMatchups(heroId) : getPublicMatchups(heroId);
+    load
       .then((data) => {
         if (!cancelled) setState({ loading: false, data, error: null });
       })
-      .catch(() => {
+      .catch((e) => {
         if (!cancelled) {
-          setState({ loading: false, data: null, error: "Не удалось загрузить матчапы." });
-          notify("Матчапы не загрузились — попробуй обновить страницу.");
+          setState({
+            loading: false,
+            data: null,
+            error: `Не удалось загрузить матчапы${e && e.detail ? `: ${e.detail}` : ""}`,
+          });
         }
       });
+
     return () => {
       cancelled = true;
     };
-  }, [heroId]);
+  }, [heroId, source]);
   return state;
 }
 
@@ -494,95 +535,6 @@ async function getLatestPatch() {
    endpoint for this, so it goes through Explorer SQL: unnest the opposing team of every
    public match the hero appears in and count wins per enemy. Heavier and slower than the
    pro endpoint, hence the explicit toggle and long cache. */
-async function getPublicMatchups(heroId) {
-  const cacheKey = `dw_pubmatch_v2_${heroId}`;
-  const cached = readLocalCache(cacheKey, CACHE_TTL_MS * 4);
-  if (cached) return cached;
-
-  // The database cancels long queries, so this samples a capped slice of recent matches
-  // instead of scanning the whole window: LIMIT lets Postgres stop early.
-  const sql = `
-    WITH mine AS (
-      SELECT radiant_win,
-             ${heroId} = ANY(radiant_team) AS on_radiant,
-             CASE WHEN ${heroId} = ANY(radiant_team) THEN dire_team ELSE radiant_team END AS enemies
-      FROM public_matches
-      WHERE start_time >= extract(epoch FROM now() - interval '12 hours')
-        AND (${heroId} = ANY(radiant_team) OR ${heroId} = ANY(dire_team))
-      LIMIT 1200
-    )
-    SELECT enemy AS hero_id,
-           COUNT(*) AS games_played,
-           SUM(CASE WHEN on_radiant = radiant_win THEN 1 ELSE 0 END) AS wins
-    FROM mine, unnest(enemies) AS enemy
-    GROUP BY enemy
-    HAVING COUNT(*) >= 5
-    ORDER BY enemy
-  `.replace(/\s+/g, " ").trim();
-
-  const r = await rateLimitedFetch(`https://api.opendota.com/api/explorer?sql=${encodeURIComponent(sql)}`);
-  const json = await r.json().catch(() => null);
-
-  // Explorer answers 200 with an "err" field on SQL problems — surface it instead of a blank failure
-  if (json && json.err) {
-    const e = new Error("sql");
-    e.detail = String(json.err).slice(0, 300);
-    throw e;
-  }
-  if (!r.ok) {
-    const e = new Error("http");
-    e.detail = `HTTP ${r.status}`;
-    throw e;
-  }
-  if (!json || !json.rows || json.rows.length === 0) {
-    const e = new Error("empty");
-    e.detail = "запрос вернул пустой результат";
-    throw e;
-  }
-
-  const data = json.rows
-    .map((row) => ({
-      hero_id: Number(row.hero_id),
-      games_played: Number(row.games_played) || 0,
-      wins: Number(row.wins) || 0,
-    }))
-    .filter((d) => d.hero_id && d.hero_id !== heroId);
-
-  try {
-    writeLocalCache(cacheKey, data);
-  } catch {
-    // quota — will be recomputed next time
-  }
-  return data;
-}
-
-function usePublicMatchups(heroId, enabled) {
-  const [state, setState] = useState({ loading: false, data: null, error: null });
-  useEffect(() => {
-    if (!heroId || !enabled) {
-      setState({ loading: false, data: null, error: null });
-      return;
-    }
-    let cancelled = false;
-    setState({ loading: true, data: null, error: null });
-    getPublicMatchups(heroId)
-      .then((data) => {
-        if (!cancelled) setState({ loading: false, data, error: null });
-      })
-      .catch((e) => {
-        if (!cancelled) {
-          setState({
-            loading: false,
-            data: null,
-            error: `Не удалось посчитать по обычным матчам${e && e.detail ? `: ${e.detail}` : ""}`,
-          });
-        }
-      });
-    return () => { cancelled = true; };
-  }, [heroId, enabled]);
-  return state;
-}
-
 async function getPatchWinRate(heroId) {
   const patch = await getLatestPatch();
   const cacheKey = `dw_patchwr_${heroId}_${patch.name}`;
@@ -1510,7 +1462,10 @@ function PeersPanel({ peers }) {
 function HeroCardTab({ heroes, selected, selectedId, setSelectedId }) {
   const [query, setQuery] = useState("");
   const [cardBracket, setCardBracket] = useState("all");
-  const { data: matchups, loading: matchupsLoading } = useMatchups(selectedId);
+  const { data: matchups, loading: matchupsLoading } = useMatchups(
+    selectedId,
+    cardBracket === "pro" ? "pro" : "public"
+  );
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -2535,18 +2490,11 @@ function CounterTableTab({ heroes, selected, selectedId, setSelectedId }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [heroQuery, setHeroQuery] = useState("");
   const [search, setSearch] = useState("");
-  const [minGames, setMinGames] = useState(10);
+  const [minGames, setMinGames] = useState(30);
   const [direction, setDirection] = useState("counters");
   const [sortDesc, setSortDesc] = useState(true);
   const [source, setSource] = useState("public");
-
-  const pro = useMatchups(selectedId);
-  const pub = usePublicMatchups(selectedId, source === "public");
-
-  const usingPublic = source === "public";
-  const matchups = usingPublic ? pub.data : pro.data;
-  const loading = usingPublic ? pub.loading : pro.loading;
-  const error = usingPublic ? pub.error : pro.error;
+  const { data: matchups, loading, error } = useMatchups(selectedId, source);
 
   const heroById = (id) => heroes.find((h) => h.id === id);
 
@@ -2665,7 +2613,7 @@ function CounterTableTab({ heroes, selected, selectedId, setSelectedId }) {
           <label style={styles.gamesLabel}>
             Мин. игр: {minGames}
             <input
-              type="range" min="10" max={source === "public" ? 200 : 200} step={10} value={minGames}
+              type="range" min="10" max="200" step="10" value={minGames}
               onChange={(e) => setMinGames(Number(e.target.value))}
               style={styles.slider}
             />
