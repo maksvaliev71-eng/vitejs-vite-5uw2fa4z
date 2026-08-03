@@ -8,8 +8,9 @@
 // Вызов: GET /api/premium-status?steamid=76561198...
 
 async function kvGet(key) {
-  const url = process.env.KV_REST_API_URL;
-  const token = process.env.KV_REST_API_TOKEN;
+  // Upstash-интеграция кладёт переменные под разными именами — поддерживаем оба
+  const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
   if (!url || !token) return null;
 
   const r = await fetch(`${url}/get/${encodeURIComponent(key)}`, {
@@ -26,7 +27,7 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "Некорректный steamid" });
   }
 
-  if (!process.env.KV_REST_API_URL) {
+  if (!process.env.KV_REST_API_URL && !process.env.UPSTASH_REDIS_REST_URL) {
     // хранилище ещё не подключено — отвечаем честно, а не выдаём премиум всем подряд
     return res.status(200).json({ premium: false, reason: "storage_not_configured" });
   }
@@ -47,4 +48,3 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "Не удалось проверить подписку" });
   }
 }
-
