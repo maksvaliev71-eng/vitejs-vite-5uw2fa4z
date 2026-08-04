@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
   BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
   XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
@@ -812,7 +812,61 @@ const TABS = [
   { key: "pricing", label: "Тарифы", icon: Gem },
 ];
 
-export default function App() {
+/* Если что-то падает, пользователь видел пустой серый экран и не мог сообщить, что
+   именно сломалось. Теперь ошибка выводится на страницу. */
+class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidCatch(error, info) {
+    console.error("[DraftHex] сбой интерфейса:", error, info);
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div style={styles.crashWrap}>
+        <div style={styles.crashCard}>
+          <div style={styles.crashTitle}>Что-то сломалось</div>
+          <div style={styles.crashText}>
+            Страница не смогла отрисоваться. Ниже техническая причина — пришли её,
+            и я починю.
+          </div>
+          <pre style={styles.crashPre}>{String(this.state.error && this.state.error.message || this.state.error)}</pre>
+          <button
+            style={styles.crashBtn}
+            onClick={() => {
+              try {
+                localStorage.clear();
+              } catch {
+                // хранилище недоступно
+              }
+              window.location.reload();
+            }}
+          >
+            Очистить данные и перезагрузить
+          </button>
+        </div>
+      </div>
+    );
+  }
+}
+
+export default function AppRoot() {
+  return (
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
+  );
+}
+
+function App() {
   const [heroes, setHeroes] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -1035,6 +1089,7 @@ export default function App() {
         .rank-scroll::-webkit-scrollbar { display: none; }
         @media (max-width: 860px) {
           .layout-cols { grid-template-columns: 1fr !important; }
+          .hero-list { max-height: 210px !important; }
           .two-col { grid-template-columns: 1fr !important; }
           .role-grid { grid-template-columns: 1fr !important; }
           .toolbar { flex-direction: column !important; align-items: stretch !important; }
@@ -1090,14 +1145,14 @@ export default function App() {
             />
           )}
           {tab === "web" && <CounterWebTab heroes={heroes} onPick={(id) => setSelectedId(id)} />}
-          {tab === "roles" && <RolesTab heroes={heroes} onPick={(id) => { setSelectedId(id); setTab("card"); }} />}
-          {tab === "draft" && <DraftTab heroes={heroes} onOpenCard={(id) => { setSelectedId(id); setTab("card"); }} />}
+          {tab === "roles" && <RolesTab heroes={heroes} onPick={(id) => setSelectedId(id)} />}
+          {tab === "draft" && <DraftTab heroes={heroes} onOpenCard={(id) => setSelectedId(id)} />}
           {tab === "captains" && <CaptainsModeTab heroes={heroes} />}
           {tab === "compare" && <CompareTab heroes={heroes} />}
           {tab === "reference" && <ReferenceTab heroes={heroes} />}
           {tab === "patches" && <PatchesTab />}
-          {tab === "matches" && <MatchesTab heroes={heroes} steamId={steamId} onOpenCard={(id) => { setSelectedId(id); setTab("card"); }} />}
-          {tab === "profile" && <ProfileTab heroes={heroes} steamIdFromUrl={steamId} onSignOut={signOut} onOpenCard={(id) => { setSelectedId(id); setTab("card"); }} />}
+          {tab === "matches" && <MatchesTab heroes={heroes} steamId={steamId} onOpenCard={(id) => setSelectedId(id)} />}
+          {tab === "profile" && <ProfileTab heroes={heroes} steamIdFromUrl={steamId} onSignOut={signOut} onOpenCard={(id) => setSelectedId(id)} />}
           {tab === "pricing" && <PricingTab onOpenLegal={setTab} />}
           {tab === "offer" && <LegalPage doc={LEGAL_OFFER} />}
           {tab === "privacy" && <LegalPage doc={LEGAL_PRIVACY} />}
@@ -1687,7 +1742,7 @@ function profileSurface(theme) {
                  radial-gradient(circle at 88% 8%, ${theme.tint}, transparent 45%)`,
     borderRadius: 18,
     padding: 16,
-    margin: -4,
+    // margin здесь задавать нельзя: он перебивает центрирование контейнера
   };
 }
 
@@ -2525,7 +2580,7 @@ function HeroCardTab({ heroes, selected, selectedId, setSelectedId }) {
             onChange={(e) => setQuery(e.target.value)}
           />
         </div>
-        <div style={styles.chipList}>
+        <div className="hero-list" style={styles.chipList}>
           {filtered.map((h) => {
             const isActive = h.id === selectedId;
             const a = ATTR[h.primary_attr] || ATTR.all;
@@ -5424,27 +5479,9 @@ function classifyMatch(detail) {
   const gold = Array.isArray(detail.radiant_gold_adv) ? detail.radiant_gold_adv : null;
   const xp = Array.isArray(detail.radiant_xp_adv) ? detail.radiant_xp_adv : null;
 
-  // Без разобранного реплея кривых нет — судим грубо, по счёту и длительности
-  if (!gold || gold.length < 5) {
-    const rs = detail.radiant_score;
-    const ds = detail.dire_score;
-    if (typeof rs !== "number" || typeof ds !== "number") return null;
-    const winner = winnerIsRadiant ? rs : ds;
-    const loser = winnerIsRadiant ? ds : rs;
-    const minutes = (detail.duration || 0) / 60;
-    const diff = winner - loser;
-
-    if (diff >= 15 && minutes < 32) {
-      return { key: "stomp", label: "Всухую", color: "#5FCB8E", approx: true,
-        reason: `Счёт ${winner}:${loser} за ${Math.round(minutes)} минут` };
-    }
-    if (diff <= 6) {
-      return { key: "close", label: "Равная игра", color: "#C084FC", approx: true,
-        reason: `Близкий счёт ${winner}:${loser}` };
-    }
-    return { key: "normal", label: "Обычная", color: "#9C8FB0", approx: true,
-      reason: `Счёт ${winner}:${loser}` };
-  }
+  /* Без разобранного реплея нет ни кривой золота, ни опыта, ни списка строений.
+     По одному финальному счёту исход не определить — метку не ставим вовсе. */
+  if (!gold || gold.length < 5) return null;
 
   // всё считаем с точки зрения победителя: положительные значения — его преимущество
   const goldCurve = gold.map((g) => (winnerIsRadiant ? g : -g));
@@ -5565,6 +5602,7 @@ function MatchesTab({ heroes, steamId, onOpenCard }) {
   useEffect(() => {
     if (!accountId) return;
     let cancelled = false;
+    // список не обнуляем: иначе страница схлопывается и прокрутка улетает наверх
     setState((s) => ({ ...s, loading: true, error: null }));
     fetchMatchList(accountId, limit)
       .then((list) => {
@@ -5729,13 +5767,13 @@ function MatchesTab({ heroes, steamId, onOpenCard }) {
               </span>
             </div>
 
-            {state.loading && <SkeletonRows count={6} />}
+            {state.loading && !state.list && <SkeletonRows count={6} />}
             {state.error && <div style={styles.emptyState}>{state.error}</div>}
-            {!state.loading && !state.error && filtered.length === 0 && (
+            {!state.loading && !state.error && state.list && filtered.length === 0 && (
               <div style={styles.emptyState}>Матчей по этим фильтрам нет.</div>
             )}
 
-            {!state.loading && filtered.map((m) => {
+            {filtered.map((m) => {
               const hero = heroById(m.hero_id);
               const won = (m.player_slot < 128) === m.radiant_win;
               const d = m.start_time ? new Date(m.start_time * 1000) : null;
@@ -5772,6 +5810,10 @@ function MatchesTab({ heroes, steamId, onOpenCard }) {
               );
             })}
 
+            {state.loading && state.list && (
+              <div style={{ ...styles.mutedText, fontSize: 12, marginTop: 10 }}>Загружаю ещё…</div>
+            )}
+
             {!state.loading && state.list && state.list.length >= limit && (
               <button style={{ ...styles.tourGo, marginTop: 12 }} onClick={() => setLimit((l) => l + MATCHES_PAGE)}>
                 Показать ещё {MATCHES_PAGE}
@@ -5793,16 +5835,43 @@ async function requestMatchParse(matchId) {
 }
 
 function ParseRequestBlock({ matchId }) {
-  const [state, setState] = useState({ status: "idle", error: null });
+  const storageKey = `dw_parse_req_${matchId}`;
+
+  // запрос запоминаем: иначе после перезагрузки кнопка снова активна и кажется, что ничего не произошло
+  const [state, setState] = useState(() => {
+    try {
+      const at = localStorage.getItem(storageKey);
+      if (at) return { status: "queued", error: null, at: Number(at) };
+    } catch {
+      // хранилище недоступно
+    }
+    return { status: "idle", error: null };
+  });
 
   async function run() {
     setState({ status: "loading", error: null });
     try {
       await requestMatchParse(matchId);
-      setState({ status: "queued", error: null });
+      const now = Date.now();
+      try {
+        localStorage.setItem(storageKey, String(now));
+      } catch {
+        // не критично
+      }
+      setState({ status: "queued", error: null, at: now });
     } catch {
       setState({ status: "error", error: "Не удалось поставить матч в очередь" });
     }
+  }
+
+  function recheck() {
+    matchDetailCache.delete(matchId);
+    try {
+      localStorage.removeItem(`dw_match_${matchId}`);
+    } catch {
+      // не критично
+    }
+    window.location.reload();
   }
 
   return (
@@ -5818,9 +5887,16 @@ function ParseRequestBlock({ matchId }) {
         <div style={{ ...styles.mutedText, fontSize: 12, marginTop: 8 }}>Отправляю запрос…</div>
       )}
       {state.status === "queued" && (
-        <div style={{ ...styles.mutedText, fontSize: 12, marginTop: 8, color: "#5FCB8E" }}>
-          Матч поставлен в очередь. Загляни сюда через несколько минут и обнови страницу.
-        </div>
+        <>
+          <div style={{ ...styles.mutedText, fontSize: 12, marginTop: 8, color: "#5FCB8E" }}>
+            Матч в очереди на разбор
+            {state.at ? ` с ${new Date(state.at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" })}` : ""}.
+            Обработка занимает несколько минут.
+          </div>
+          <button style={{ ...styles.tourGo, marginTop: 8 }} onClick={recheck}>
+            Проверить готовность
+          </button>
+        </>
       )}
       {state.status === "error" && (
         <div style={{ ...styles.mutedText, fontSize: 12, marginTop: 8, color: "#E2574C" }}>{state.error}</div>
@@ -5902,9 +5978,9 @@ function MatchDetail({ matchId, heroes, accountId, onClose, onOpenCard }) {
                   return tag ? (
                     <div
                       style={{ ...styles.matchTag, color: tag.color, borderColor: tag.color, marginBottom: 6 }}
-                      title={tag.approx ? "Оценка по счёту: реплей не разобран" : "По кривой преимущества"}
+                      title="По преимуществу в золоте, опыте и строениях"
                     >
-                      {tag.label}{tag.approx ? " ~" : ""}
+                      {tag.label}
                     </div>
                   ) : null;
                 })()}
@@ -5986,7 +6062,6 @@ function MatchDetail({ matchId, heroes, accountId, onClose, onOpenCard }) {
               <div style={{ ...styles.panel, borderLeft: `4px solid ${tag.color}` }}>
                 <div style={styles.verdictHead}>
                   <span style={{ ...styles.verdictLabel, color: tag.color }}>{tag.label}</span>
-                  {tag.approx && <span style={styles.verdictApprox}>оценка по счёту</span>}
                 </div>
                 {tag.reason && <div style={styles.verdictReason}>{tag.reason}</div>}
               </div>
@@ -7332,6 +7407,25 @@ function ComparePicker({ heroes, selectedId, onSelect, align }) {
    #E5B33D  премиум
    Цвета атрибутов героев (ATTR) — отдельная смысловая шкала, к тексту не относится. */
 const styles = {
+  crashWrap: {
+    minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center",
+    padding: 20, background: "#07050D",
+  },
+  crashCard: {
+    maxWidth: 560, width: "100%", background: "#150C24", border: "1px solid #5A2430",
+    borderRadius: 14, padding: 22, color: "#F2EAFB", fontFamily: "'Inter', sans-serif",
+  },
+  crashTitle: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 22, marginBottom: 8 },
+  crashText: { fontSize: 13, color: "#C4B8D8", lineHeight: 1.5, marginBottom: 12 },
+  crashPre: {
+    background: "#0E081A", border: "1px solid #2A1A40", borderRadius: 8, padding: 12,
+    fontSize: 12, color: "#F0B6AF", whiteSpace: "pre-wrap", wordBreak: "break-word",
+    maxHeight: 200, overflow: "auto",
+  },
+  crashBtn: {
+    marginTop: 14, background: "transparent", border: "1px solid #3A2857", color: "#C4B8D8",
+    fontSize: 13, padding: "9px 16px", borderRadius: 999, cursor: "pointer",
+  },
   /* toast */
   toast: {
     position: "fixed", bottom: 20, left: "50%", transform: "translateX(-50%)", zIndex: 200,
@@ -7598,7 +7692,7 @@ const styles = {
 
   layout: { display: "grid", gridTemplateColumns: "260px minmax(0, 1fr)", gap: 20, alignItems: "start" },
   sidebar: { background: "#0E081A", border: "1px solid #2A1A40", borderRadius: 10, padding: 8, display: "flex", flexDirection: "column", gap: 8 },
-  chipList: { display: "flex", flexDirection: "column", gap: 4, maxHeight: "calc(100vh - 220px)", overflowY: "auto" },
+  chipList: { display: "flex", flexDirection: "column", gap: 4, maxHeight: "min(420px, calc(100vh - 260px))", overflowY: "auto" },
   heroChip: {
     display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", borderRadius: 6, border: "1px solid #2F1F49",
     cursor: "pointer", textAlign: "left", color: "#F2EAFB",
