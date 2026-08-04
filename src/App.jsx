@@ -806,6 +806,7 @@ const TABS = [
   { key: "compare", label: "Сравнить героев", icon: GitCompare },
   { key: "reference", label: "Справочник", icon: BookOpen },
   { key: "patches", label: "Патчи", icon: History },
+  { key: "matches", label: "Разбор матчей", icon: History },
   { key: "profile", label: "Мой профиль", icon: User },
   { key: "pricing", label: "Тарифы", icon: Gem },
 ];
@@ -814,12 +815,44 @@ export default function App() {
   const [heroes, setHeroes] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  /* Сессия: после входа через Steam запоминаем игрока, чтобы разделы знали, кто он,
+     и не приходилось вводить ID заново после перезагрузки. */
   const [steamIdFromUrl] = useState(() => {
     if (typeof window === "undefined") return null;
     const id = new URLSearchParams(window.location.search).get("steamid");
     if (id) window.history.replaceState({}, "", window.location.pathname);
     return id;
   });
+
+  const [steamId, setSteamId] = useState(() => {
+    if (steamIdFromUrl) return steamIdFromUrl;
+    try {
+      return localStorage.getItem("dw_steam_id");
+    } catch {
+      return null;
+    }
+  });
+
+  useEffect(() => {
+    if (!steamIdFromUrl) return;
+    setSteamId(steamIdFromUrl);
+    try {
+      localStorage.setItem("dw_steam_id", steamIdFromUrl);
+    } catch {
+      // хранилище недоступно — сессия проживёт до перезагрузки
+    }
+  }, [steamIdFromUrl]);
+
+  function signOut() {
+    setSteamId(null);
+    try {
+      localStorage.removeItem("dw_steam_id");
+      localStorage.removeItem("dw_premium_paid");
+    } catch {
+      // ничего страшного
+    }
+    setTab("home");
+  }
   const [tab, setTabState] = useState(() => {
     if (steamIdFromUrl) return "profile";
     try {
@@ -1062,7 +1095,8 @@ export default function App() {
           {tab === "compare" && <CompareTab heroes={heroes} />}
           {tab === "reference" && <ReferenceTab heroes={heroes} />}
           {tab === "patches" && <PatchesTab />}
-          {tab === "profile" && <ProfileTab heroes={heroes} steamIdFromUrl={steamIdFromUrl} onOpenCard={(id) => { setSelectedId(id); setTab("card"); }} />}
+          {tab === "matches" && <MatchesTab heroes={heroes} steamId={steamId} onOpenCard={(id) => { setSelectedId(id); setTab("card"); }} />}
+          {tab === "profile" && <ProfileTab heroes={heroes} steamIdFromUrl={steamId} onSignOut={signOut} onOpenCard={(id) => { setSelectedId(id); setTab("card"); }} />}
           {tab === "pricing" && <PricingTab onOpenLegal={setTab} />}
           {tab === "offer" && <LegalPage doc={LEGAL_OFFER} />}
           {tab === "privacy" && <LegalPage doc={LEGAL_PRIVACY} />}
@@ -1666,7 +1700,7 @@ function themedPanel(theme, extra) {
   };
 }
 
-function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
+function ProfileTab({ heroes, steamIdFromUrl, onOpenCard, onSignOut }) {
   const [premium] = usePremium();
   const [input, setInput] = useState("");
   const [accountId, setAccountId] = useState(null);
@@ -1831,6 +1865,12 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
                   {rankedOnly ? " (только рейтинг)" : " (все режимы)"}
                 </div>
               </div>
+
+              {onSignOut && steamIdFromUrl && (
+                <button style={styles.signOutBtn} onClick={onSignOut} title="Выйти">
+                  Выйти
+                </button>
+              )}
 
               {theme.name && (
                 <div style={styles.medalWrap}>
@@ -5060,7 +5100,11 @@ function PatchesTab() {
 
   const list = useMemo(() => {
     if (!state.patches) return [];
-    return [...state.patches].reverse().slice(0, 40);
+    // список приходит от старых к новым; буквенные версии (7.41e) идут наравне с цифровыми
+    return [...state.patches]
+      .filter((p) => p && p.name)
+      .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))
+      .slice(0, 60);
   }, [state.patches]);
 
   return (
@@ -5091,7 +5135,18 @@ function PatchRow({ patch, isLatest }) {
     if (next && !notes.data && !notes.loading) {
       setNotes({ loading: true, data: null, error: false });
       getPatchNotes()
-        .then((all) => setNotes({ loading: false, data: all[patch.name] || null, error: false }))
+        .then((all) => {
+          // 7.41e может лежать и под «7.41e», и под «7.41» — проверяем оба варианта
+          const exact = all[patch.name];
+          const baseName = String(patch.name).replace(/[a-z]$/i, "");
+          const fallback = !exact && baseName !== patch.name ? all[baseName] : null;
+          setNotes({
+            loading: false,
+            data: exact || fallback || null,
+            usedBase: !exact && !!fallback ? baseName : null,
+            error: false,
+          });
+        })
         .catch(() => setNotes({ loading: false, data: null, error: true }));
     }
   }
@@ -5135,6 +5190,11 @@ function PatchRow({ patch, isLatest }) {
                   Полученные разделы: {Object.keys(notes.data).slice(0, 12).join(", ") || "пусто"}
                 </div>
               )}
+            </div>
+          )}
+          {notes.usedBase && (
+            <div style={{ ...styles.mutedText, fontSize: 11, marginBottom: 8 }}>
+              Отдельных заметок для {patch.name} нет — показаны изменения версии {notes.usedBase}
             </div>
           )}
           {sections.map((s) => (
@@ -5243,6 +5303,366 @@ function PricingTab({ onOpenLegal }) {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/* ---------- разбор матчей ---------- */
+
+const MATCHES_PAGE = 20;
+
+async function fetchMatchList(accountId, limit) {
+  const r = await rateLimitedFetch(
+    `https://api.opendota.com/api/players/${accountId}/matches?limit=${limit}&significant=0` +
+      "&project=kills&project=deaths&project=assists&project=hero_id&project=start_time" +
+      "&project=duration&project=radiant_win&project=player_slot&project=game_mode" +
+      "&project=lobby_type&project=gold_per_min&project=xp_per_min&project=last_hits"
+  );
+  if (!r.ok) throw new Error("network");
+  return r.json();
+}
+
+const matchDetailCache = new Map();
+
+async function fetchMatchDetail(matchId) {
+  if (matchDetailCache.has(matchId)) return matchDetailCache.get(matchId);
+  const cached = readLocalCache(`dw_match_${matchId}`);
+  if (cached) {
+    matchDetailCache.set(matchId, cached);
+    return cached;
+  }
+  const r = await rateLimitedFetch(`https://api.opendota.com/api/matches/${matchId}`);
+  if (!r.ok) throw new Error("network");
+  const data = await r.json();
+  matchDetailCache.set(matchId, data);
+  try {
+    writeLocalCache(`dw_match_${matchId}`, data);
+  } catch {
+    // матч большой, места может не хватить — не страшно
+  }
+  return data;
+}
+
+function MatchesTab({ heroes, steamId, onOpenCard }) {
+  const accountId = useMemo(() => parseSteamAccountId(steamId || ""), [steamId]);
+  const [manualId, setManualId] = useState("");
+  const [limit, setLimit] = useState(MATCHES_PAGE);
+  const [state, setState] = useState({ loading: false, list: null, error: null });
+  const [openMatch, setOpenMatch] = useState(null);
+
+  const [heroFilter, setHeroFilter] = useState("all");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+
+  useEffect(() => {
+    if (!accountId) return;
+    let cancelled = false;
+    setState((s) => ({ ...s, loading: true, error: null }));
+    fetchMatchList(accountId, limit)
+      .then((list) => {
+        if (!cancelled) setState({ loading: false, list, error: null });
+      })
+      .catch(() => {
+        if (!cancelled) setState({ loading: false, list: null, error: "Не удалось загрузить историю матчей." });
+      });
+    return () => { cancelled = true; };
+  }, [accountId, limit]);
+
+  const heroById = (id) => heroes.find((h) => h.id === id);
+
+  const playedHeroes = useMemo(() => {
+    if (!state.list) return [];
+    const ids = [...new Set(state.list.map((m) => m.hero_id).filter(Boolean))];
+    return ids
+      .map((id) => heroById(id))
+      .filter(Boolean)
+      .sort((a, b) => a.localized_name.localeCompare(b.localized_name));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.list, heroes]);
+
+  const filtered = useMemo(() => {
+    if (!state.list) return [];
+    const fromTs = dateFrom ? new Date(dateFrom).getTime() / 1000 : null;
+    const toTs = dateTo ? new Date(dateTo).getTime() / 1000 + 86400 : null;
+    return state.list.filter((m) => {
+      if (heroFilter !== "all" && String(m.hero_id) !== heroFilter) return false;
+      if (fromTs && m.start_time < fromTs) return false;
+      if (toTs && m.start_time > toTs) return false;
+      return true;
+    });
+  }, [state.list, heroFilter, dateFrom, dateTo]);
+
+  if (!accountId) {
+    return (
+      <div style={styles.body}>
+        <div style={styles.panel}>
+          <div style={styles.panelHeader}>
+            <History size={16} color="#C084FC" />
+            <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Разбор матчей</span>
+          </div>
+          <p style={styles.legalText}>
+            Войди через Steam — история матчей подтянется сама, вводить номера не придётся.
+          </p>
+          <div style={styles.profileForm}>
+            <a href="/api/steam-login" className="btn-lift" style={styles.steamLoginBtn}>
+              Войти через Steam
+            </a>
+          </div>
+
+          <div style={{ ...styles.mutedText, fontSize: 12, marginTop: 16 }}>
+            Или открой конкретный матч по номеру:
+          </div>
+          <div style={styles.profileForm}>
+            <input
+              style={styles.profileInput}
+              placeholder="Номер матча"
+              value={manualId}
+              onChange={(e) => setManualId(e.target.value)}
+            />
+            <button
+              className="btn-lift"
+              style={styles.homeCta}
+              onClick={() => manualId.trim() && setOpenMatch(manualId.trim())}
+            >
+              Открыть <ArrowRight size={16} />
+            </button>
+          </div>
+        </div>
+
+        {openMatch && (
+          <MatchDetail matchId={openMatch} heroes={heroes} onClose={() => setOpenMatch(null)} onOpenCard={onOpenCard} />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div style={styles.body}>
+      {openMatch ? (
+        <MatchDetail matchId={openMatch} heroes={heroes} onClose={() => setOpenMatch(null)} onOpenCard={onOpenCard} />
+      ) : (
+        <>
+          <div style={styles.panel}>
+            <div style={styles.panelHeader}>
+              <Search size={16} color="#C084FC" />
+              <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Фильтры</span>
+            </div>
+
+            <div style={styles.filterRow}>
+              <label style={styles.filterLabel}>Герой</label>
+              <select
+                style={styles.filterInput}
+                value={heroFilter}
+                onChange={(e) => setHeroFilter(e.target.value)}
+              >
+                <option value="all">Все герои</option>
+                {playedHeroes.map((h) => (
+                  <option key={h.id} value={String(h.id)}>{h.localized_name}</option>
+                ))}
+              </select>
+            </div>
+
+            <div style={styles.filterRow}>
+              <label style={styles.filterLabel}>С даты</label>
+              <input type="date" style={styles.filterInput} value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
+            </div>
+
+            <div style={styles.filterRow}>
+              <label style={styles.filterLabel}>По дату</label>
+              <input type="date" style={styles.filterInput} value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
+            </div>
+
+            {(heroFilter !== "all" || dateFrom || dateTo) && (
+              <button
+                style={{ ...styles.tourGo, marginTop: 10 }}
+                onClick={() => { setHeroFilter("all"); setDateFrom(""); setDateTo(""); }}
+              >
+                Сбросить фильтры
+              </button>
+            )}
+          </div>
+
+          <div style={styles.panel}>
+            <div style={styles.panelHeader}>
+              <History size={16} color="#C084FC" />
+              <span style={{ ...styles.panelTitle, color: "#C084FC" }}>
+                История матчей {state.list ? `(${filtered.length})` : ""}
+              </span>
+            </div>
+
+            {state.loading && <SkeletonRows count={6} />}
+            {state.error && <div style={styles.emptyState}>{state.error}</div>}
+            {!state.loading && !state.error && filtered.length === 0 && (
+              <div style={styles.emptyState}>Матчей по этим фильтрам нет.</div>
+            )}
+
+            {!state.loading && filtered.map((m) => {
+              const hero = heroById(m.hero_id);
+              const won = (m.player_slot < 128) === m.radiant_win;
+              const d = m.start_time ? new Date(m.start_time * 1000) : null;
+              return (
+                <div
+                  key={m.match_id}
+                  className="role-row"
+                  style={{ ...styles.roleRow, borderLeft: `3px solid ${won ? "#5FCB8E" : "#E2574C"}`, paddingLeft: 8 }}
+                  onClick={() => setOpenMatch(String(m.match_id))}
+                >
+                  <HeroIcon hero={hero} style={styles.matchupIcon} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={styles.matchupName}>{hero ? hero.localized_name : "Герой"}</div>
+                    <div style={{ ...styles.mutedText, fontSize: 11 }}>
+                      {m.kills}/{m.deaths}/{m.assists} · {Math.round((m.duration || 0) / 60)} мин
+                      {d ? ` · ${d.toLocaleDateString("ru-RU")}` : ""}
+                    </div>
+                  </div>
+                  <span style={{ ...styles.rolePct, color: won ? "#5FCB8E" : "#E2574C" }}>
+                    {won ? "Победа" : "Пораж."}
+                  </span>
+                </div>
+              );
+            })}
+
+            {!state.loading && state.list && state.list.length >= limit && (
+              <button style={{ ...styles.tourGo, marginTop: 12 }} onClick={() => setLimit((l) => l + MATCHES_PAGE)}>
+                Показать ещё {MATCHES_PAGE}
+              </button>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function MatchDetail({ matchId, heroes, onClose, onOpenCard }) {
+  const [state, setState] = useState({ loading: true, data: null, error: null });
+
+  useEffect(() => {
+    let cancelled = false;
+    setState({ loading: true, data: null, error: null });
+    fetchMatchDetail(matchId)
+      .then((data) => {
+        if (!cancelled) setState({ loading: false, data, error: null });
+      })
+      .catch(() => {
+        if (!cancelled) setState({ loading: false, data: null, error: "Не удалось загрузить матч." });
+      });
+    return () => { cancelled = true; };
+  }, [matchId]);
+
+  const heroById = (id) => heroes.find((h) => h.id === id);
+  const m = state.data;
+
+  const advantage = useMemo(() => {
+    if (!m || !Array.isArray(m.radiant_gold_adv)) return [];
+    return m.radiant_gold_adv.map((g, i) => ({
+      minute: i,
+      gold: g,
+      xp: Array.isArray(m.radiant_xp_adv) ? m.radiant_xp_adv[i] : null,
+    }));
+  }, [m]);
+
+  return (
+    <>
+      <div style={styles.matchTopBar}>
+        <button style={styles.tourGo} onClick={onClose}>← К списку</button>
+        <span style={{ ...styles.mutedText, fontSize: 12 }}>Матч {matchId}</span>
+      </div>
+
+      {state.loading && <div style={styles.panel}><SkeletonRows count={8} /></div>}
+      {state.error && <div style={styles.panel}><div style={styles.emptyState}>{state.error}</div></div>}
+
+      {m && (
+        <>
+          <div style={styles.panel}>
+            <div style={styles.matchScore}>
+              <div style={{ ...styles.matchSide, color: "#5FCB8E" }}>
+                <div style={styles.matchSideName}>Radiant</div>
+                <div style={styles.matchSideScore}>{m.radiant_score ?? "—"}</div>
+                {m.radiant_win === true && <div style={styles.matchWinTag}>победа</div>}
+              </div>
+              <div style={styles.matchMeta}>
+                <div>{Math.round((m.duration || 0) / 60)} мин</div>
+                <div style={{ ...styles.mutedText, fontSize: 11 }}>
+                  {m.start_time ? new Date(m.start_time * 1000).toLocaleString("ru-RU") : ""}
+                </div>
+              </div>
+              <div style={{ ...styles.matchSide, color: "#E2574C" }}>
+                <div style={styles.matchSideName}>Dire</div>
+                <div style={styles.matchSideScore}>{m.dire_score ?? "—"}</div>
+                {m.radiant_win === false && <div style={styles.matchWinTag}>победа</div>}
+              </div>
+            </div>
+          </div>
+
+          {advantage.length > 3 && (
+            <div style={styles.panel}>
+              <div style={styles.panelHeader}>
+                <BarChart3 size={16} color="#C084FC" />
+                <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Преимущество Radiant по минутам</span>
+              </div>
+              <div style={{ width: "100%", height: 220 }}>
+                <ResponsiveContainer>
+                  <LineChart data={advantage} margin={{ top: 8, right: 8, left: -10, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#2A1A40" vertical={false} />
+                    <XAxis dataKey="minute" tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={{ stroke: "#2A1A40" }} tickLine={false} />
+                    <YAxis tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={false} tickLine={false} />
+                    <Tooltip
+                      contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 10, fontSize: 12, padding: "8px 12px" }}
+                      itemStyle={{ color: "#F2EAFB" }}
+                      labelStyle={{ color: "#F2EAFB" }}
+                      labelFormatter={(v) => `${v} минута`}
+                      formatter={(v, n) => [v > 0 ? `+${v}` : v, n === "gold" ? "Золото" : "Опыт"]}
+                    />
+                    <Line type="monotone" dataKey="gold" stroke="#E5B33D" strokeWidth={2} dot={false} />
+                    <Line type="monotone" dataKey="xp" stroke="#C084FC" strokeWidth={2} dot={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+              <div style={{ ...styles.mutedText, fontSize: 11, marginTop: 6 }}>
+                Выше нуля — впереди Radiant, ниже — Dire. Жёлтая линия золото, фиолетовая опыт.
+              </div>
+            </div>
+          )}
+
+          <div className="two-col" style={styles.twoCol}>
+            <MatchTeam title="Radiant" color="#5FCB8E" players={(m.players || []).filter((p) => p.player_slot < 128)} heroById={heroById} onOpenCard={onOpenCard} />
+            <MatchTeam title="Dire" color="#E2574C" players={(m.players || []).filter((p) => p.player_slot >= 128)} heroById={heroById} onOpenCard={onOpenCard} />
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
+const LANE_NAMES = { 1: "Сейф", 2: "Мид", 3: "Оффлейн", 4: "Джунгли" };
+
+function MatchTeam({ title, color, players, heroById, onOpenCard }) {
+  return (
+    <div style={{ ...styles.panel, borderTop: `3px solid ${color}` }}>
+      <div style={styles.panelHeader}>
+        <span style={{ ...styles.panelTitle, color }}>{title}</span>
+      </div>
+      {players.map((p) => {
+        const hero = heroById(p.hero_id);
+        const kda = p.deaths > 0 ? ((p.kills + p.assists) / p.deaths).toFixed(1) : "∞";
+        return (
+          <div key={p.player_slot} style={styles.matchPlayer} onClick={() => hero && onOpenCard(hero.id)}>
+            <HeroIcon hero={hero} style={styles.matchupIcon} />
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={styles.matchupName}>
+                {hero ? hero.localized_name : "Герой"}
+                {p.lane_role && LANE_NAMES[p.lane_role] && (
+                  <span style={styles.laneTag}>{LANE_NAMES[p.lane_role]}</span>
+                )}
+              </div>
+              <div style={{ ...styles.mutedText, fontSize: 11 }}>
+                {p.kills}/{p.deaths}/{p.assists} · KDA {kda} · {p.gold_per_min || 0} зол/мин · {p.last_hits || 0} добито
+              </div>
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -6542,6 +6962,11 @@ const styles = {
     pointerEvents: "none", opacity: 0.55,
   },
   avatarWrap: { position: "relative", flexShrink: 0 },
+  signOutBtn: {
+    position: "absolute", top: 12, right: 12, background: "transparent",
+    border: "1px solid #3A2857", color: "#9C8FB0", fontSize: 11,
+    padding: "4px 10px", borderRadius: 999, cursor: "pointer",
+  },
   medalWrap: {
     marginLeft: "auto", display: "flex", flexDirection: "column", alignItems: "center",
     gap: 4, flexShrink: 0,
@@ -6599,6 +7024,28 @@ const styles = {
   forecastValue: {
     fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 13, width: 96,
     textAlign: "right", flexShrink: 0, whiteSpace: "nowrap",
+  },
+  filterRow: { display: "flex", alignItems: "center", gap: 10, marginTop: 10, flexWrap: "wrap" },
+  filterLabel: { fontSize: 12, color: "#9C8FB0", width: 70, flexShrink: 0 },
+  filterInput: {
+    flex: 1, minWidth: 150, background: "#140B22", border: "1px solid #2F1F49", borderRadius: 8,
+    padding: "9px 12px", color: "#F2EAFB", fontSize: 13, outline: "none",
+    fontFamily: "'Inter', sans-serif",
+  },
+  matchTopBar: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" },
+  matchScore: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 },
+  matchSide: { textAlign: "center", flex: 1, minWidth: 0 },
+  matchSideName: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 14, letterSpacing: "0.04em" },
+  matchSideScore: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 30, lineHeight: 1.1 },
+  matchWinTag: { fontSize: 10, textTransform: "uppercase", letterSpacing: "0.05em" },
+  matchMeta: { textAlign: "center", flexShrink: 0, fontSize: 13, color: "#C4B8D8" },
+  matchPlayer: {
+    display: "flex", alignItems: "center", gap: 10, padding: "8px 0",
+    borderBottom: "1px solid #241636", cursor: "pointer",
+  },
+  laneTag: {
+    marginLeft: 8, fontSize: 10, color: "#9C8FB0", border: "1px solid #3A2857",
+    borderRadius: 999, padding: "1px 7px",
   },
   cmSetupRow: { display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginTop: 14 },
   cmSetupLabel: { fontSize: 13, color: "#9C8FB0", width: 90, flexShrink: 0 },
