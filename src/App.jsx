@@ -729,25 +729,28 @@ function parseSteamAccountId(raw) {
 
 const PLAYER_TTL_MS = 15 * 60 * 1000; // 15 minutes — personal data changes often
 
-async function fetchPlayerBundle(accountId) {
-  const cacheKey = `dw_player_${accountId}`;
+async function fetchPlayerBundle(accountId, rankedOnly = true) {
+  const cacheKey = `dw_player_${accountId}_${rankedOnly ? "ranked" : "all"}`;
   const cached = readLocalCache(cacheKey, PLAYER_TTL_MS);
   if (cached) return cached;
 
+  const lobby = rankedOnly ? "?lobby_type=7" : "";
+  const lobbyAmp = rankedOnly ? "&lobby_type=7" : "";
+
   const [profileRes, wlRes, heroesRes, matchesRes, peersRes] = await Promise.all([
     fetch(`https://api.opendota.com/api/players/${accountId}`),
-    // lobby_type=7 — рейтинговые матчи; wl без limit даёт статистику за всё время
-    fetch(`https://api.opendota.com/api/players/${accountId}/wl?lobby_type=7`),
-    fetch(`https://api.opendota.com/api/players/${accountId}/heroes?lobby_type=7`),
+    // lobby_type=7 — только рейтинговые; без него считаются все режимы
+    fetch(`https://api.opendota.com/api/players/${accountId}/wl${lobby}`),
+    fetch(`https://api.opendota.com/api/players/${accountId}/heroes${lobby}`),
     // gpm/xpm/last_hits/lane_role приходят только если запросить их явно
     fetch(
-      `https://api.opendota.com/api/players/${accountId}/matches?limit=300&lobby_type=7` +
+      `https://api.opendota.com/api/players/${accountId}/matches?limit=300${lobbyAmp}` +
         "&project=kills&project=deaths&project=assists" +
         "&project=gold_per_min&project=xp_per_min&project=last_hits" +
         "&project=lane_role&project=duration&project=hero_damage&project=tower_damage" +
         "&project=hero_id&project=start_time&project=radiant_win&project=player_slot"
     ),
-    fetch(`https://api.opendota.com/api/players/${accountId}/peers?lobby_type=7`),
+    fetch(`https://api.opendota.com/api/players/${accountId}/peers${lobby}`),
   ]);
   if (!profileRes.ok || !wlRes.ok || !heroesRes.ok || !matchesRes.ok) throw new Error("network");
 
@@ -762,7 +765,7 @@ async function fetchPlayerBundle(accountId) {
   return data;
 }
 
-function usePlayerBundle(accountId) {
+function usePlayerBundle(accountId, rankedOnly = true) {
   const [state, setState] = useState({ loading: false, data: null, error: null });
   useEffect(() => {
     if (!accountId) {
@@ -771,7 +774,7 @@ function usePlayerBundle(accountId) {
     }
     let cancelled = false;
     setState({ loading: true, data: null, error: null });
-    fetchPlayerBundle(accountId)
+    fetchPlayerBundle(accountId, rankedOnly)
       .then((data) => {
         if (!cancelled) setState({ loading: false, data, error: null });
       })
@@ -784,7 +787,7 @@ function usePlayerBundle(accountId) {
     return () => {
       cancelled = true;
     };
-  }, [accountId]);
+  }, [accountId, rankedOnly]);
   return state;
 }
 
@@ -1666,7 +1669,8 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
   const [input, setInput] = useState("");
   const [accountId, setAccountId] = useState(null);
   const [parseError, setParseError] = useState(null);
-  const { loading, data, error } = usePlayerBundle(accountId);
+  const [rankedOnly, setRankedOnly] = useState(true);
+  const { loading, data, error } = usePlayerBundle(accountId, rankedOnly);
   const theme = useMemo(() => rankTheme(data && data.profile), [data]);
 
   useEffect(() => {
@@ -1754,6 +1758,23 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
         Кнопка "Войти через Steam" работает только после настройки backend (см. инструкцию) — до этого пользуйся полем выше.
       </div>
       {parseError && <div style={styles.errorBox}>{parseError}</div>}
+
+      {accountId && (
+        <div style={styles.segment}>
+          <button
+            style={{ ...styles.segmentBtn, ...(rankedOnly ? styles.segmentBtnActive : {}) }}
+            onClick={() => setRankedOnly(true)}
+          >
+            Только рейтинг
+          </button>
+          <button
+            style={{ ...styles.segmentBtn, ...(!rankedOnly ? styles.segmentBtnActive : {}) }}
+            onClick={() => setRankedOnly(false)}
+          >
+            Все матчи
+          </button>
+        </div>
+      )}
 
       {loading && (
         <div style={themedPanel(theme)}>
