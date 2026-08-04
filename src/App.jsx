@@ -1513,16 +1513,43 @@ const RANK_TIERS = [
   { medal: 8, name: "Титан", color: "#F0C044", glow: "rgba(240,192,68,0.50)" },
 ];
 
-const DEFAULT_RANK_THEME = { name: null, color: "#C084FC", glow: "rgba(178,75,243,0.35)", stars: 0 };
+const DEFAULT_RANK_THEME = {
+  name: null,
+  color: "#C084FC",
+  glow: "rgba(178,75,243,0.35)",
+  stars: 0,
+  tint: "rgba(192,132,252,0.06)",
+  tintStrong: "rgba(192,132,252,0.13)",
+  border: "rgba(192,132,252,0.40)",
+  glowSoft: "rgba(192,132,252,0.14)",
+};
+
+function hexToRgba(hex, alpha) {
+  const h = hex.replace("#", "");
+  const r = parseInt(h.slice(0, 2), 16);
+  const g = parseInt(h.slice(2, 4), 16);
+  const b = parseInt(h.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function withShades(base) {
+  return {
+    ...base,
+    tint: hexToRgba(base.color, 0.06),
+    tintStrong: hexToRgba(base.color, 0.13),
+    border: hexToRgba(base.color, 0.4),
+    glowSoft: hexToRgba(base.color, 0.14),
+  };
+}
 
 function rankTheme(profile) {
   const tier = profile && profile.rank_tier;
-  if (!tier) return DEFAULT_RANK_THEME;
+  if (!tier) return withShades({ ...DEFAULT_RANK_THEME, stars: 0 });
   const medal = Math.floor(tier / 10);
   const stars = tier % 10;
   const found = RANK_TIERS.find((r) => r.medal === medal);
-  if (!found) return DEFAULT_RANK_THEME;
-  return { ...found, stars };
+  if (!found) return withShades({ ...DEFAULT_RANK_THEME, stars: 0 });
+  return withShades({ ...found, stars });
 }
 
 /* Картинка медали. Точный адрес официальных иконок подтвердить не удалось, поэтому
@@ -1612,6 +1639,28 @@ function RankLightning({ color }) {
   );
 }
 
+/* Панель, окрашенная под ранг. Используется во всей вкладке профиля, чтобы цвет медали
+   задавал вид раздела, а не мелькал точечными акцентами. */
+function profileSurface(theme) {
+  return {
+    background: `radial-gradient(circle at 12% 0%, ${theme.tintStrong}, transparent 55%),
+                 radial-gradient(circle at 88% 8%, ${theme.tint}, transparent 45%)`,
+    borderRadius: 18,
+    padding: 16,
+    margin: -4,
+  };
+}
+
+function themedPanel(theme, extra) {
+  return {
+    ...styles.panel,
+    background: `linear-gradient(160deg, ${theme.tintStrong}, #140B22 70%)`,
+    border: `1px solid ${theme.border}`,
+    boxShadow: `0 0 30px ${theme.glowSoft}`,
+    ...extra,
+  };
+}
+
 function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
   const [premium] = usePremium();
   const [input, setInput] = useState("");
@@ -1685,7 +1734,7 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
   }, [data]);
 
   return (
-    <div style={styles.body}>
+    <div style={{ ...styles.body, ...profileSurface(theme) }}>
 
       <form onSubmit={handleSubmit} style={styles.profileForm}>
         <input
@@ -1707,7 +1756,7 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
       {parseError && <div style={styles.errorBox}>{parseError}</div>}
 
       {loading && (
-        <div style={styles.panel}>
+        <div style={themedPanel(theme)}>
           <SkeletonRows count={5} />
         </div>
       )}
@@ -1782,10 +1831,10 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
           <ProfileCharts matches={data.matches} wl={data.wl} heroes={heroes} onOpenCard={onOpenCard} theme={theme} />
 
           {monthlyTrend.length > 0 && (
-            <div style={styles.panel}>
+            <div style={themedPanel(theme)}>
               <div style={styles.panelHeader}>
-                <BarChart3 size={16} color="#C084FC" />
-                <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Винрейт по месяцам</span>
+                <BarChart3 size={16} color={theme.color} />
+                <span style={{ ...styles.panelTitle, color: theme.color }}>Винрейт по месяцам</span>
               </div>
               <div style={{ width: "100%", height: 220 }}>
                 <ResponsiveContainer>
@@ -1796,7 +1845,7 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
                     <Tooltip
                       contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 10, fontSize: 12, padding: "8px 12px" }}
                     itemStyle={{ color: "#F2EAFB" }}
-                    cursor={{ fill: "rgba(178,75,243,0.10)" }}
+                    cursor={{ fill: theme.tintStrong }}
                       labelStyle={{ color: "#F2EAFB" }}
                       formatter={(value, name, props) => [`${value}% (${props.payload.games} игр)`, "Винрейт"]}
                     />
@@ -1807,10 +1856,10 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
             </div>
           )}
 
-          <div style={styles.panel}>
+          <div style={themedPanel(theme)}>
             <div style={styles.panelHeader}>
-              <Crown size={16} color="#C084FC" />
-              <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Топ героев по количеству игр</span>
+              <Crown size={16} color={theme.color} />
+              <span style={{ ...styles.panelTitle, color: theme.color }}>Топ героев по количеству игр</span>
             </div>
             {topHeroes.length === 0 && <div style={styles.mutedText}>Недостаточно данных.</div>}
             {topHeroes.map((h) => (
@@ -1825,7 +1874,7 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
             ))}
           </div>
 
-          <PeersPanel peers={data.peers} />
+          <PeersPanel peers={data.peers} theme={theme} />
 
           {premium ? (
             <PremiumProfilePanels matches={data.matches} accountId={accountId} heroes={heroes} />
@@ -1843,7 +1892,10 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
 
 const WEEKDAY_RU = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
 
-const MIX_COLORS = ["#C084FC", "#5FCB8E", "#E5B33D", "#5B9FE0", "#E2574C", "#8B5CF6"];
+/* Оттенки одного цвета ранга: диаграмма читается как единое целое, а не как радуга. */
+function mixShades(base) {
+  return [1, 0.82, 0.66, 0.52, 0.4, 0.3].map((a) => hexToRgba(base, a));
+}
 
 /* Иконка героя ставится снаружи своего сегмента кольца. Мелкие сегменты пропускаем —
    иначе картинки налезают друг на друга. */
@@ -1873,7 +1925,9 @@ function renderHeroSliceIcon(props) {
   );
 }
 
-function HeroMixPanel({ heroCount, heroes, onOpenCard }) {
+function HeroMixPanel({ heroCount, heroes, onOpenCard, theme = DEFAULT_RANK_THEME }) {
+  const shades = useMemo(() => mixShades(theme ? theme.color : "#C084FC"), [theme]);
+
   const data = useMemo(() => {
     const rows = Object.entries(heroCount || {})
       .map(([id, v]) => ({ hero: heroes.find((h) => h.id === Number(id)), games: v.games, wins: v.wins }))
@@ -1888,19 +1942,19 @@ function HeroMixPanel({ heroCount, heroes, onOpenCard }) {
       winRate: r.games ? r.wins / r.games : 0,
       heroId: r.hero.id,
       icon: img(r.hero.icon),
-      color: MIX_COLORS[i % MIX_COLORS.length],
+      color: shades[i % shades.length],
     }));
     if (restGames > 0) out.push({ name: "Прочие", value: restGames, color: "#3A2857", heroId: null });
     return out;
-  }, [heroCount, heroes]);
+  }, [heroCount, heroes, shades]);
 
   if (data.length === 0) return null;
 
   return (
-    <div style={styles.panel}>
+    <div style={themedPanel(theme)}>
       <div style={styles.panelHeader}>
-        <Crown size={16} color="#C084FC" />
-        <span style={{ ...styles.panelTitle, color: "#C084FC" }}>На ком играешь</span>
+        <Crown size={16} color={theme.color} />
+        <span style={{ ...styles.panelTitle, color: theme.color }}>На ком играешь</span>
       </div>
       <div style={{ width: "100%", height: 230 }}>
         <ResponsiveContainer>
@@ -1942,13 +1996,13 @@ function HeroMixPanel({ heroCount, heroes, onOpenCard }) {
   );
 }
 
-function RecentMatchesPanel({ recent, heroes, onOpenCard }) {
+function RecentMatchesPanel({ recent, heroes, onOpenCard, theme = DEFAULT_RANK_THEME }) {
   if (!recent || recent.length === 0) return null;
   return (
-    <div style={styles.panel}>
+    <div style={themedPanel(theme)}>
       <div style={styles.panelHeader}>
-        <History size={16} color="#C084FC" />
-        <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Последние матчи</span>
+        <History size={16} color={theme.color} />
+        <span style={{ ...styles.panelTitle, color: theme.color }}>Последние матчи</span>
       </div>
       {recent.map((m) => {
         const hero = heroes.find((h) => h.id === m.heroId);
@@ -2180,10 +2234,10 @@ function ProfileCharts({ matches, wl, heroes, onOpenCard, theme = DEFAULT_RANK_T
       </div>
 
       <div className="two-col" style={styles.twoCol}>
-        <div style={styles.panel}>
+        <div style={themedPanel(theme)}>
           <div style={styles.panelHeader}>
-            <BarChart3 size={16} color="#C084FC" />
-            <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Винрейт по дням недели</span>
+            <BarChart3 size={16} color={theme.color} />
+            <span style={{ ...styles.panelTitle, color: theme.color }}>Винрейт по дням недели</span>
           </div>
           {stats.weekday.length === 0 ? (
             <div style={styles.emptyState}>Мало данных.</div>
@@ -2197,7 +2251,7 @@ function ProfileCharts({ matches, wl, heroes, onOpenCard, theme = DEFAULT_RANK_T
                   <Tooltip
                     contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 10, fontSize: 12, padding: "8px 12px" }}
                     itemStyle={{ color: "#F2EAFB" }}
-                    cursor={{ fill: "rgba(178,75,243,0.10)" }}
+                    cursor={{ fill: theme.tintStrong }}
                     labelStyle={{ color: "#F2EAFB" }}
                     formatter={(v, n, p) => [`${v}% (${p.payload.games} игр)`, "Винрейт"]}
                   />
@@ -2212,10 +2266,10 @@ function ProfileCharts({ matches, wl, heroes, onOpenCard, theme = DEFAULT_RANK_T
           )}
         </div>
 
-        <div style={styles.panel}>
+        <div style={themedPanel(theme)}>
           <div style={styles.panelHeader}>
-            <BarChart3 size={16} color="#C084FC" />
-            <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Винрейт по времени суток</span>
+            <BarChart3 size={16} color={theme.color} />
+            <span style={{ ...styles.panelTitle, color: theme.color }}>Винрейт по времени суток</span>
           </div>
           {stats.dayParts.length === 0 ? (
             <div style={styles.emptyState}>Мало данных.</div>
@@ -2229,7 +2283,7 @@ function ProfileCharts({ matches, wl, heroes, onOpenCard, theme = DEFAULT_RANK_T
                   <Tooltip
                     contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 10, fontSize: 12, padding: "8px 12px" }}
                     itemStyle={{ color: "#F2EAFB" }}
-                    cursor={{ fill: "rgba(178,75,243,0.10)" }}
+                    cursor={{ fill: theme.tintStrong }}
                     labelStyle={{ color: "#F2EAFB" }}
                     formatter={(v, n, p) => [`${v}% (${p.payload.games} игр)`, "Винрейт"]}
                   />
@@ -2246,15 +2300,15 @@ function ProfileCharts({ matches, wl, heroes, onOpenCard, theme = DEFAULT_RANK_T
       </div>
 
       <div className="two-col" style={styles.twoCol}>
-        <HeroMixPanel heroCount={stats.heroCount} heroes={heroes} onOpenCard={onOpenCard} />
-        <RecentMatchesPanel recent={stats.recent} heroes={heroes} onOpenCard={onOpenCard} />
+        <HeroMixPanel heroCount={stats.heroCount} heroes={heroes} onOpenCard={onOpenCard} theme={theme} />
+        <RecentMatchesPanel recent={stats.recent} heroes={heroes} onOpenCard={onOpenCard} theme={theme} />
       </div>
 
       <div className="two-col" style={styles.twoCol}>
-        <div style={styles.panel}>
+        <div style={themedPanel(theme)}>
           <div style={styles.panelHeader}>
-            <BarChart3 size={16} color="#C084FC" />
-            <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Винрейт по длине игры</span>
+            <BarChart3 size={16} color={theme.color} />
+            <span style={{ ...styles.panelTitle, color: theme.color }}>Винрейт по длине игры</span>
           </div>
           {stats.duration.length === 0 ? (
             <div style={styles.emptyState}>Мало данных.</div>
@@ -2268,7 +2322,7 @@ function ProfileCharts({ matches, wl, heroes, onOpenCard, theme = DEFAULT_RANK_T
                   <Tooltip
                     contentStyle={{ background: "#150C24", border: "1px solid #2F1F49", borderRadius: 10, fontSize: 12, padding: "8px 12px" }}
                     itemStyle={{ color: "#F2EAFB" }}
-                    cursor={{ fill: "rgba(178,75,243,0.10)" }}
+                    cursor={{ fill: theme.tintStrong }}
                     labelStyle={{ color: "#F2EAFB" }}
                     formatter={(v, n, p) => [`${v}% (${p.payload.games} игр)`, "Винрейт"]}
                   />
@@ -2287,7 +2341,7 @@ function ProfileCharts({ matches, wl, heroes, onOpenCard, theme = DEFAULT_RANK_T
   );
 }
 
-function PeersPanel({ peers }) {
+function PeersPanel({ peers, theme = DEFAULT_RANK_THEME }) {
   const top = useMemo(() => {
     if (!Array.isArray(peers)) return [];
     return peers
@@ -2300,10 +2354,10 @@ function PeersPanel({ peers }) {
   if (top.length === 0) return null;
 
   return (
-    <div style={styles.panel}>
+    <div style={themedPanel(theme)}>
       <div style={styles.panelHeader}>
-        <Handshake size={16} color="#C084FC" />
-        <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Синергия с союзниками</span>
+        <Handshake size={16} color={theme.color} />
+        <span style={{ ...styles.panelTitle, color: theme.color }}>Синергия с союзниками</span>
       </div>
       {top.map((p) => (
         <div key={p.account_id} style={styles.roleRow}>
@@ -5189,17 +5243,30 @@ function isSupport(h) {
   return (h.roles || []).includes("Support");
 }
 
-function roleAllowed(hero, teamHeroes) {
-  const slotsLeft = 5 - teamHeroes.length;
-  const cores = teamHeroes.filter(isCore).length;
-  const supports = teamHeroes.filter(isSupport).length;
-  const supportsNeeded = Math.max(0, 2 - supports);
+/* Состав задаётся по слотам, а не «мягкими» пожеланиями: первые три пика — кор-герои,
+   последние два — саппорты. Так команда гарантированно не окажется из пяти керри. */
+const SLOT_ROLES = ["core", "core", "core", "support", "support"];
 
-  // мест осталось ровно столько, сколько нужно саппортов — берём только их
-  if (slotsLeft <= supportsNeeded && !isSupport(hero)) return false;
-  // больше трёх кор-героев в команде не нужно
-  if (isCore(hero) && !isSupport(hero) && cores >= 3) return false;
+function slotRoleFor(teamHeroes) {
+  return SLOT_ROLES[teamHeroes.length] || "core";
+}
+
+function roleAllowed(hero, teamHeroes) {
+  const need = slotRoleFor(teamHeroes);
+
+  if (need === "support") return isSupport(hero);
+
+  // среди кор-слотов не больше двух чистых керри — третьим нужен мид или оффлейн
+  const carries = teamHeroes.filter((h) => isCore(h) && !isSupport(h)).length;
+  if (isCore(hero) && !isSupport(hero) && carries >= 2) return false;
   return true;
+}
+
+/* Если под нужную роль вообще ничего не осталось, лучше взять хоть кого-то,
+   чем застрять на этом ходу. */
+function applyRoleFilter(list, teamHeroes) {
+  const filtered = list.filter((h) => roleAllowed(h, teamHeroes));
+  return filtered.length > 0 ? filtered : list;
 }
 
 function CaptainsModeTab({ heroes }) {
@@ -5286,10 +5353,11 @@ function CaptainsModeTab({ heroes }) {
     const teamIds = forSide === "radiant" ? picks.radiant : picks.dire;
     const teamHeroes = teamIds.map((id) => heroes.find((h) => h.id === id)).filter(Boolean);
 
-    return pool
-      .filter((h) => !usedIds.has(h.id))
-      // для пика соблюдаем состав команды; бан ролью не ограничен
-      .filter((h) => (action === "pick" ? roleAllowed(h, teamHeroes) : true))
+    let candidates = pool.filter((h) => !usedIds.has(h.id));
+    // для пика соблюдаем состав команды; бан ролью не ограничен
+    if (action === "pick") candidates = applyRoleFilter(candidates, teamHeroes);
+
+    return candidates
       .map((h) => ({ hero: h, score: scoreFor(h.id, forSide, action) }))
       .filter((x) => x.score != null)
       .sort((a, b) => b.score - a.score);
@@ -5346,7 +5414,7 @@ function CaptainsModeTab({ heroes }) {
         const teamIds = currentSide === "radiant" ? picks.radiant : picks.dire;
         const teamHeroes = teamIds.map((id) => heroes.find((h) => h.id === id)).filter(Boolean);
         let free = pool.filter((h) => !usedIds.has(h.id));
-        if (currentAction === "pick") free = free.filter((h) => roleAllowed(h, teamHeroes));
+        if (currentAction === "pick") free = applyRoleFilter(free, teamHeroes);
         if (free.length === 0) return;
         chosen = free[Math.floor(Math.random() * free.length)].id;
       }
@@ -5372,6 +5440,13 @@ function CaptainsModeTab({ heroes }) {
     let free = pool.filter((h) => !usedIds.has(h.id));
     if (q) free = free.filter((h) => h.localized_name.toLowerCase().includes(q));
 
+    // тот же состав действует и для игрока: показываем подходящих под текущий слот
+    if (currentAction === "pick" && isMyTurn) {
+      const teamIds = side === "radiant" ? picks.radiant : picks.dire;
+      const teamHeroes = teamIds.map((id) => heroes.find((h) => h.id === id)).filter(Boolean);
+      free = applyRoleFilter(free, teamHeroes);
+    }
+
     const order = ["str", "agi", "int", "all"];
     return order
       .map((key) => ({
@@ -5383,7 +5458,7 @@ function CaptainsModeTab({ heroes }) {
           .sort((a, b) => a.localized_name.localeCompare(b.localized_name)),
       }))
       .filter((g) => g.list.length > 0);
-  }, [pool, usedIds, query]);
+  }, [pool, usedIds, query, currentAction, isMyTurn, picks, side, heroes]);
 
   if (!started) {
     return (
@@ -5452,6 +5527,15 @@ function CaptainsModeTab({ heroes }) {
               {isMyTurn ? "Твой ход" : "Ход соперника"} ·{" "}
               {currentAction === "ban" ? "бан" : "пик"} ·{" "}
               {currentSide === "radiant" ? "Radiant" : "Dire"}
+              {currentAction === "pick" && (
+                <span style={styles.cmNeedRole}>
+                  нужен {slotRoleFor(
+                    (currentSide === "radiant" ? picks.radiant : picks.dire)
+                      .map((id) => heroes.find((h) => h.id === id))
+                      .filter(Boolean)
+                  ) === "support" ? "саппорт" : "кор"}
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -6493,6 +6577,10 @@ const styles = {
   cmSetupLabel: { fontSize: 13, color: "#9C8FB0", width: 90, flexShrink: 0 },
   cmHeader: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" },
   cmStepLabel: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 18 },
+  cmNeedRole: {
+    marginLeft: 8, fontSize: 11, color: "#C084FC", border: "1px solid #3A2857",
+    borderRadius: 999, padding: "1px 8px",
+  },
   cmTurn: { fontSize: 13, marginTop: 2 },
   cmYou: {
     fontSize: 10, color: "#C084FC", border: "1px solid #C084FC", borderRadius: 999,
