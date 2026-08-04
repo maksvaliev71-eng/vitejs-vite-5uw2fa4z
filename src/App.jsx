@@ -750,6 +750,7 @@ async function fetchPlayerBundle(accountId, rankedOnly = true) {
         "&project=kills&project=deaths&project=assists" +
         "&project=gold_per_min&project=xp_per_min&project=last_hits" +
         "&project=lane_role&project=duration&project=hero_damage&project=tower_damage" +
+        "&project=party_size" +
         "&project=hero_id&project=start_time&project=radiant_win&project=player_slot"
     ),
     fetch(`https://api.opendota.com/api/players/${accountId}/peers${lobby}`),
@@ -2175,6 +2176,16 @@ function ProfileCharts({ matches, wl, heroes, onOpenCard, theme = DEFAULT_RANK_T
       if (won(m)) part.wins += 1;
     });
 
+    // статистика по размеру группы: играешь один или полной пятёркой
+    const parties = { solo: { games: 0, wins: 0 }, duo: { games: 0, wins: 0 }, trio: { games: 0, wins: 0 }, five: { games: 0, wins: 0 } };
+    list.forEach((m) => {
+      const size = m.party_size;
+      if (!size) return;
+      const key = size >= 5 ? "five" : size >= 3 ? "trio" : size === 2 ? "duo" : "solo";
+      parties[key].games += 1;
+      if (won(m)) parties[key].wins += 1;
+    });
+
     const recent = [...list]
       .filter((m) => m.start_time)
       .sort((a, b) => b.start_time - a.start_time)
@@ -2195,6 +2206,12 @@ function ProfileCharts({ matches, wl, heroes, onOpenCard, theme = DEFAULT_RANK_T
     return {
       n,
       heroCount,
+      parties: [
+        { label: "Один", ...parties.solo },
+        { label: "Вдвоём", ...parties.duo },
+        { label: "Втроём-вчетвером", ...parties.trio },
+        { label: "Пятёркой", ...parties.five },
+      ].filter((p) => p.games >= 3),
       recent,
       dayParts: dayParts
         .filter((x) => x.games >= 2)
@@ -2365,6 +2382,27 @@ function ProfileCharts({ matches, wl, heroes, onOpenCard, theme = DEFAULT_RANK_T
           )}
         </div>
       </div>
+
+      {stats.parties.length > 0 && (
+        <div style={themedPanel(theme)}>
+          <div style={styles.panelHeader}>
+            <Users size={16} color={theme.color} />
+            <span style={{ ...styles.panelTitle, color: theme.color }}>Винрейт по составу группы</span>
+          </div>
+          {stats.parties.map((pt) => {
+            const wr = pt.wins / pt.games;
+            return (
+              <div key={pt.label} style={styles.roleRow}>
+                <span style={styles.matchupName}>{pt.label}</span>
+                <span style={styles.mutedText}>{pt.games} игр</span>
+                <span style={{ ...styles.rolePct, color: wr >= 0.5 ? "#5FCB8E" : "#E2574C" }}>
+                  {(wr * 100).toFixed(0)}%
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       <div className="two-col" style={styles.twoCol}>
         <HeroMixPanel heroCount={stats.heroCount} heroes={heroes} onOpenCard={onOpenCard} theme={theme} />
@@ -5136,14 +5174,18 @@ function PatchRow({ patch, isLatest }) {
       setNotes({ loading: true, data: null, error: false });
       getPatchNotes()
         .then((all) => {
-          // 7.41e может лежать и под «7.41e», и под «7.41» — проверяем оба варианта
-          const exact = all[patch.name];
-          const baseName = String(patch.name).replace(/[a-z]$/i, "");
-          const fallback = !exact && baseName !== patch.name ? all[baseName] : null;
+          // в файле ключи записаны через подчёркивание: 7.06d лежит под «7_06d»
+          const key = String(patch.name).replace(/\./g, "_");
+          const exact = all[key];
+
+          // для буквенных версий может не быть отдельных заметок — берём родительскую
+          const baseKey = key.replace(/[a-z]$/i, "");
+          const fallback = !exact && baseKey !== key ? all[baseKey] : null;
+
           setNotes({
             loading: false,
             data: exact || fallback || null,
-            usedBase: !exact && !!fallback ? baseName : null,
+            usedBase: !exact && fallback ? baseKey.replace(/_/g, ".") : null,
             error: false,
           });
         })
@@ -5151,15 +5193,58 @@ function PatchRow({ patch, isLatest }) {
     }
   }
 
+  /* Реальная структура файла: { general: [...], items: { ключ: [...] },
+     heroes: { герой: { general: [...], talents: [...], способность: [...] } } } */
   const sections = useMemo(() => {
-    if (!notes.data) return [];
-    if (Array.isArray(notes.data)) {
-      const lines = flattenPatchSection(notes.data);
-      return lines.length ? [{ title: "Изменения", lines }] : [];
+    const d = notes.data;
+    if (!d) return [];
+    if (Array.isArray(d)) {
+      const lines = flattenPatchSection(d);
+      return lines.length ? [{ title: "Изменения", groups: [{ name: null, lines }] }] : [];
     }
-    return Object.entries(notes.data)
-      .map(([key, value]) => ({ title: prettifyPatchKey(key), lines: flattenPatchSection(value) }))
-      .filter((s) => s.lines.length > 0);
+
+    const out = [];
+
+    const general = flattenPatchSection(d.general);
+    if (general.length) out.push({ title: "Общие изменения", groups: [{ name: null, lines: general }] });
+
+    if (d.items && typeof d.items === "object") {
+      const groups = Object.entries(d.items)
+        .map(([key, val]) => ({ name: prettifyPatchKey(key), lines: flattenPatchSection(val) }))
+        .filter((g) => g.lines.length > 0);
+      if (groups.length) out.push({ title: `Предметы (${groups.length})`, groups });
+    }
+
+    if (d.heroes && typeof d.heroes === "object") {
+      const groups = Object.entries(d.heroes)
+        .map(([heroKey, val]) => {
+          const lines = [];
+          if (val && typeof val === "object" && !Array.isArray(val)) {
+            Object.entries(val).forEach(([sub, arr]) => {
+              const subLines = flattenPatchSection(arr);
+              if (subLines.length === 0) return;
+              // "general" и "talents" подписывать отдельным заголовком не нужно
+              const prefix =
+                sub === "general" ? "" : sub === "talents" ? "Таланты: " : `${prettifyPatchKey(sub)}: `;
+              subLines.forEach((l) => lines.push(prefix + l));
+            });
+          } else {
+            flattenPatchSection(val).forEach((l) => lines.push(l));
+          }
+          return { name: prettifyPatchKey(heroKey), lines };
+        })
+        .filter((g) => g.lines.length > 0);
+      if (groups.length) out.push({ title: `Герои (${groups.length})`, groups });
+    }
+
+    // на случай, если появятся неизвестные разделы
+    Object.entries(d).forEach(([key, val]) => {
+      if (["general", "items", "heroes"].includes(key)) return;
+      const lines = flattenPatchSection(val);
+      if (lines.length) out.push({ title: prettifyPatchKey(key), groups: [{ name: null, lines }] });
+    });
+
+    return out;
   }, [notes.data]);
 
   return (
@@ -5200,10 +5285,15 @@ function PatchRow({ patch, isLatest }) {
           {sections.map((s) => (
             <div key={s.title} style={styles.patchSection}>
               <div style={styles.patchSectionTitle}>{s.title}</div>
-              {s.lines.slice(0, 40).map((line, idx) => (
-                <div key={idx} style={styles.patchLine}>
-                  <span style={styles.patchBullet} />
-                  <span>{line}</span>
+              {s.groups.map((g, gi) => (
+                <div key={gi} style={g.name ? styles.patchGroup : undefined}>
+                  {g.name && <div style={styles.patchGroupName}>{g.name}</div>}
+                  {g.lines.map((line, idx) => (
+                    <div key={idx} style={styles.patchLine}>
+                      <span style={styles.patchBullet} />
+                      <span>{line}</span>
+                    </div>
+                  ))}
                 </div>
               ))}
             </div>
@@ -5324,34 +5414,120 @@ async function fetchMatchList(accountId, limit) {
 
 /* Классификация матча по кривой преимущества — то же, что показывает STRATZ:
    всухую, камбек, равная игра. Считается из radiant_gold_adv, ничего не выдумано. */
+/* Исход матча определяем по трём признакам сразу, как и просили:
+   золото, опыт и потерянные строения. Камбек — когда победитель заметно уступал
+   хотя бы по двум из трёх и всё равно выиграл. */
 function classifyMatch(detail) {
-  const adv = detail && detail.radiant_gold_adv;
-  if (!Array.isArray(adv) || adv.length < 5 || detail.radiant_win == null) return null;
+  if (!detail || detail.radiant_win == null) return null;
 
   const winnerIsRadiant = detail.radiant_win;
-  // преимущество с точки зрения победителя
-  const curve = adv.map((g) => (winnerIsRadiant ? g : -g));
-  const peakDeficit = Math.min(...curve);
-  const finalLead = curve[curve.length - 1];
-  const leadChanges = curve.reduce((acc, v, i) => {
+  const gold = Array.isArray(detail.radiant_gold_adv) ? detail.radiant_gold_adv : null;
+  const xp = Array.isArray(detail.radiant_xp_adv) ? detail.radiant_xp_adv : null;
+
+  // Без разобранного реплея кривых нет — судим грубо, по счёту и длительности
+  if (!gold || gold.length < 5) {
+    const rs = detail.radiant_score;
+    const ds = detail.dire_score;
+    if (typeof rs !== "number" || typeof ds !== "number") return null;
+    const winner = winnerIsRadiant ? rs : ds;
+    const loser = winnerIsRadiant ? ds : rs;
+    const minutes = (detail.duration || 0) / 60;
+    const diff = winner - loser;
+
+    if (diff >= 15 && minutes < 32) {
+      return { key: "stomp", label: "Всухую", color: "#5FCB8E", approx: true,
+        reason: `Счёт ${winner}:${loser} за ${Math.round(minutes)} минут` };
+    }
+    if (diff <= 6) {
+      return { key: "close", label: "Равная игра", color: "#C084FC", approx: true,
+        reason: `Близкий счёт ${winner}:${loser}` };
+    }
+    return { key: "normal", label: "Обычная", color: "#9C8FB0", approx: true,
+      reason: `Счёт ${winner}:${loser}` };
+  }
+
+  // всё считаем с точки зрения победителя: положительные значения — его преимущество
+  const goldCurve = gold.map((g) => (winnerIsRadiant ? g : -g));
+  const xpCurve = xp && xp.length === gold.length ? xp.map((v) => (winnerIsRadiant ? v : -v)) : null;
+
+  const goldDeficit = Math.min(...goldCurve);
+  const xpDeficit = xpCurve ? Math.min(...xpCurve) : 0;
+  const finalGold = goldCurve[goldCurve.length - 1];
+
+  // строения: считаем, сколько башен потерял каждый по ходу игры
+  let towersLostByWinner = 0;
+  let towersLostByLoser = 0;
+  if (Array.isArray(detail.objectives)) {
+    detail.objectives.forEach((o) => {
+      if (!o) return;
+      const isTower = o.type === "building_kill"
+        ? String(o.key || "").includes("tower")
+        : o.type === "CHAT_MESSAGE_TOWER_KILL";
+      if (!isTower) return;
+      // строение принадлежит стороне, противоположной той, что его снесла
+      const killerRadiant = o.team === 2 || o.player_slot < 128;
+      const lostByRadiant = !killerRadiant;
+      if (lostByRadiant === winnerIsRadiant) towersLostByWinner += 1;
+      else towersLostByLoser += 1;
+    });
+  }
+
+  const behindGold = goldDeficit < -5000;
+  const behindXp = xpCurve ? xpDeficit < -5000 : false;
+  const behindTowers = towersLostByWinner - towersLostByLoser >= 3;
+  const behindCount = [behindGold, behindXp, behindTowers].filter(Boolean).length;
+
+  const aheadAllGame = goldCurve.every((v, i) => i < 3 || v > 0);
+  const dominatedTowers = towersLostByLoser - towersLostByWinner >= 5;
+
+  const fmtK = (v) => `${(Math.abs(v) / 1000).toFixed(1)}к`;
+
+  if (behindCount >= 2) {
+    const parts = [];
+    if (behindGold) parts.push(`уступал ${fmtK(goldDeficit)} золота`);
+    if (behindXp) parts.push(`${fmtK(xpDeficit)} опыта`);
+    if (behindTowers) parts.push(`потерял на ${towersLostByWinner - towersLostByLoser} башни больше`);
+    return {
+      key: "comeback",
+      label: "Камбек",
+      color: "#E5B33D",
+      reason: `Победитель ${parts.join(", ")} — и всё равно выиграл`,
+    };
+  }
+
+  if (aheadAllGame && finalGold > 20000 && (dominatedTowers || towersLostByWinner <= 2)) {
+    return {
+      key: "stomp",
+      label: "Всухую",
+      color: "#5FCB8E",
+      reason: `Вёл всю игру, к концу ${fmtK(finalGold)} золота перевеса`,
+    };
+  }
+
+  const swingSmall = Math.abs(goldDeficit) < 6000 && finalGold < 15000;
+  const leadChanges = goldCurve.reduce((acc, v, i) => {
     if (i === 0) return acc;
-    const prev = curve[i - 1];
+    const prev = goldCurve[i - 1];
     return acc + ((prev < 0 && v > 0) || (prev > 0 && v < 0) ? 1 : 0);
   }, 0);
-  const everBehind = peakDeficit < -3000;
-  const alwaysAhead = curve.every((v, i) => i < 3 || v > 0);
 
-  if (everBehind && peakDeficit < -8000) {
-    return { key: "comeback", label: "Камбек", color: "#E5B33D" };
+  if (leadChanges >= 4 || swingSmall) {
+    return {
+      key: "close",
+      label: "Равная игра",
+      color: "#C084FC",
+      reason: leadChanges >= 4
+        ? `Преимущество переходило ${leadChanges} раз`
+        : "Разрыв по золоту и опыту почти не менялся",
+    };
   }
-  if (alwaysAhead && finalLead > 20000) {
-    return { key: "stomp", label: "Всухую", color: "#5FCB8E" };
-  }
-  if (leadChanges >= 4 || (Math.abs(peakDeficit) < 6000 && finalLead < 15000)) {
-    return { key: "close", label: "Равная игра", color: "#C084FC" };
-  }
-  if (everBehind) return { key: "comeback", label: "Камбек", color: "#E5B33D" };
-  return { key: "normal", label: "Обычная", color: "#9C8FB0" };
+
+  return {
+    key: "normal",
+    label: "Обычная",
+    color: "#9C8FB0",
+    reason: `К концу ${fmtK(finalGold)} золота перевеса`,
+  };
 }
 
 const matchDetailCache = new Map();
@@ -5493,7 +5669,7 @@ function MatchesTab({ heroes, steamId, onOpenCard }) {
         </div>
 
         {openMatch && (
-          <MatchDetail matchId={openMatch} heroes={heroes} onClose={() => setOpenMatch(null)} onOpenCard={onOpenCard} />
+          <MatchDetail matchId={openMatch} heroes={heroes} accountId={accountId} onClose={() => setOpenMatch(null)} onOpenCard={onOpenCard} />
         )}
       </div>
     );
@@ -5502,7 +5678,7 @@ function MatchesTab({ heroes, steamId, onOpenCard }) {
   return (
     <div style={styles.body}>
       {openMatch ? (
-        <MatchDetail matchId={openMatch} heroes={heroes} onClose={() => setOpenMatch(null)} onOpenCard={onOpenCard} />
+        <MatchDetail matchId={openMatch} heroes={heroes} accountId={accountId} onClose={() => setOpenMatch(null)} onOpenCard={onOpenCard} />
       ) : (
         <>
           <div style={styles.panel}>
@@ -5608,7 +5784,52 @@ function MatchesTab({ heroes, steamId, onOpenCard }) {
   );
 }
 
-function MatchDetail({ matchId, heroes, onClose, onOpenCard }) {
+/* OpenDota разбирает реплеи не для всех матчей. Этот запрос ставит матч в очередь —
+   после обработки появятся драки, полученный урон и кривая преимущества. */
+async function requestMatchParse(matchId) {
+  const r = await fetch(`https://api.opendota.com/api/request/${matchId}`, { method: "POST" });
+  if (!r.ok) throw new Error("network");
+  return r.json();
+}
+
+function ParseRequestBlock({ matchId }) {
+  const [state, setState] = useState({ status: "idle", error: null });
+
+  async function run() {
+    setState({ status: "loading", error: null });
+    try {
+      await requestMatchParse(matchId);
+      setState({ status: "queued", error: null });
+    } catch {
+      setState({ status: "error", error: "Не удалось поставить матч в очередь" });
+    }
+  }
+
+  return (
+    <div style={styles.parseBlock}>
+      <div style={{ ...styles.mutedText, fontSize: 12 }}>
+        Реплей этого матча не разобран, поэтому нет драк, полученного урона и кривой
+        преимущества. Разбор можно запросить — он занимает несколько минут.
+      </div>
+      {state.status === "idle" && (
+        <button style={{ ...styles.tourGo, marginTop: 8 }} onClick={run}>Запросить разбор</button>
+      )}
+      {state.status === "loading" && (
+        <div style={{ ...styles.mutedText, fontSize: 12, marginTop: 8 }}>Отправляю запрос…</div>
+      )}
+      {state.status === "queued" && (
+        <div style={{ ...styles.mutedText, fontSize: 12, marginTop: 8, color: "#5FCB8E" }}>
+          Матч поставлен в очередь. Загляни сюда через несколько минут и обнови страницу.
+        </div>
+      )}
+      {state.status === "error" && (
+        <div style={{ ...styles.mutedText, fontSize: 12, marginTop: 8, color: "#E2574C" }}>{state.error}</div>
+      )}
+    </div>
+  );
+}
+
+function MatchDetail({ matchId, heroes, accountId, onClose, onOpenCard }) {
   const [state, setState] = useState({ loading: true, data: null, error: null });
   const [itemCatalog, setItemCatalog] = useState(null);
 
@@ -5679,8 +5900,11 @@ function MatchDetail({ matchId, heroes, onClose, onOpenCard }) {
                 {(() => {
                   const tag = classifyMatch(m);
                   return tag ? (
-                    <div style={{ ...styles.matchTag, color: tag.color, borderColor: tag.color, marginBottom: 6 }}>
-                      {tag.label}
+                    <div
+                      style={{ ...styles.matchTag, color: tag.color, borderColor: tag.color, marginBottom: 6 }}
+                      title={tag.approx ? "Оценка по счёту: реплей не разобран" : "По кривой преимущества"}
+                    >
+                      {tag.label}{tag.approx ? " ~" : ""}
                     </div>
                   ) : null;
                 })()}
@@ -5754,6 +5978,24 @@ function MatchDetail({ matchId, heroes, onClose, onOpenCard }) {
               </div>
             </div>
           )}
+
+          {(() => {
+            const tag = classifyMatch(m);
+            if (!tag) return null;
+            return (
+              <div style={{ ...styles.panel, borderLeft: `4px solid ${tag.color}` }}>
+                <div style={styles.verdictHead}>
+                  <span style={{ ...styles.verdictLabel, color: tag.color }}>{tag.label}</span>
+                  {tag.approx && <span style={styles.verdictApprox}>оценка по счёту</span>}
+                </div>
+                {tag.reason && <div style={styles.verdictReason}>{tag.reason}</div>}
+              </div>
+            );
+          })()}
+
+          <PersonalReview match={m} accountId={accountId} heroById={heroById} itemCatalog={itemCatalog} />
+
+          {!Array.isArray(m.radiant_gold_adv) && <ParseRequestBlock matchId={matchId} />}
 
           <TeamfightsPanel match={m} heroById={heroById} />
 
@@ -5974,6 +6216,133 @@ function FightMap({ points }) {
   );
 }
 
+function fmtThousands(v) {
+  if (typeof v !== "number") return "—";
+  return v >= 1000 ? `${(v / 1000).toFixed(1)}к` : String(v);
+}
+
+/* Получено урона есть только у разобранных матчей, поэтому иконку рисуем сами,
+   чтобы не тянуть лишнюю зависимость. */
+function ShieldAlertIconLike() {
+  return (
+    <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="#C084FC" strokeWidth="2.5">
+      <path d="M12 2 L20 6 V12 C20 17 16 21 12 22 C8 21 4 17 4 12 V6 Z" />
+    </svg>
+  );
+}
+
+/* Личный разбор. Процентили считает сам OpenDota: они показывают, как эта игра
+   выглядит на фоне других игр на том же герое. Есть только у разобранных матчей. */
+const BENCH_LABELS = {
+  gold_per_min: "Золото в минуту",
+  xp_per_min: "Опыт в минуту",
+  kills_per_min: "Убийства",
+  last_hits_per_min: "Добивание",
+  hero_damage_per_min: "Урон по героям",
+  tower_damage: "Урон по строениям",
+  stuns_per_min: "Контроль",
+  hero_healing_per_min: "Лечение",
+};
+
+function PersonalReview({ match, accountId, heroById, itemCatalog }) {
+  const me = useMemo(() => {
+    if (!match || !accountId) return null;
+    return (match.players || []).find((p) => String(p.account_id) === String(accountId)) || null;
+  }, [match, accountId]);
+
+  if (!me) return null;
+
+  const hero = heroById(me.hero_id);
+  const won = (me.player_slot < 128) === match.radiant_win;
+  const kda = me.deaths > 0 ? ((me.kills + me.assists) / me.deaths).toFixed(2) : "∞";
+
+  const marks = Object.entries(me.benchmarks || {})
+    .map(([key, val]) => {
+      const pct = val && typeof val.pct === "number" ? Math.round(val.pct * 100) : null;
+      if (pct == null || !BENCH_LABELS[key]) return null;
+      return { key, label: BENCH_LABELS[key], pct };
+    })
+    .filter(Boolean)
+    .sort((a, b) => b.pct - a.pct);
+
+  const best = marks[0];
+  const worst = marks[marks.length - 1];
+
+  return (
+    <div style={{ ...styles.panel, borderTop: `3px solid ${won ? "#5FCB8E" : "#E2574C"}` }}>
+      <div style={styles.panelHeader}>
+        <User size={16} color={won ? "#5FCB8E" : "#E2574C"} />
+        <span style={{ ...styles.panelTitle, color: won ? "#5FCB8E" : "#E2574C" }}>
+          Твоя игра — {won ? "победа" : "поражение"}
+        </span>
+      </div>
+
+      <div style={styles.personalTop}>
+        <HeroIcon hero={hero} field="img" style={styles.personalPortrait} />
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={styles.personalHero}>{hero ? hero.localized_name : "Герой"}</div>
+          <div style={styles.personalKda}>
+            {me.kills}/{me.deaths}/{me.assists} · KDA {kda}
+          </div>
+          <div style={styles.playerStatsRow}>
+            {typeof me.net_worth === "number" && (
+              <span style={styles.playerStat}><Gem size={10} color="#E5B33D" /> {fmtThousands(me.net_worth)}</span>
+            )}
+            {typeof me.hero_damage === "number" && (
+              <span style={styles.playerStat}><Swords size={10} color="#E2574C" /> {fmtThousands(me.hero_damage)}</span>
+            )}
+            {typeof me.last_hits === "number" && (
+              <span style={styles.playerStat}>{me.last_hits} добито</span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {marks.length === 0 ? (
+        <div style={styles.emptyState}>
+          Показателей в сравнении с другими играми нет — реплей матча не разобран.
+        </div>
+      ) : (
+        <>
+          <div style={styles.benchIntro}>
+            Насколько эта игра лучше других игр на этом герое
+          </div>
+
+          {marks.map((mk) => (
+            <div key={mk.key} style={styles.benchRow}>
+              <span style={styles.benchLabel}>{mk.label}</span>
+              <div style={styles.benchTrack}>
+                <div
+                  style={{
+                    ...styles.benchFill,
+                    width: `${mk.pct}%`,
+                    background: mk.pct >= 60 ? "#5FCB8E" : mk.pct >= 35 ? "#E5B33D" : "#E2574C",
+                  }}
+                />
+              </div>
+              <span
+                style={{
+                  ...styles.benchPct,
+                  color: mk.pct >= 60 ? "#5FCB8E" : mk.pct >= 35 ? "#E5B33D" : "#E2574C",
+                }}
+              >
+                {mk.pct}%
+              </span>
+            </div>
+          ))}
+
+          {best && worst && best.key !== worst.key && (
+            <div style={styles.benchSummary}>
+              Сильнее всего — {best.label.toLowerCase()} (лучше {best.pct}% игр),
+              слабее всего — {worst.label.toLowerCase()} (лучше {worst.pct}%).
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 function MatchTeam({ title, color, players, heroById, onOpenCard, itemCatalog }) {
   return (
     <div style={{ ...styles.panel, borderTop: `3px solid ${color}` }}>
@@ -5993,9 +6362,38 @@ function MatchTeam({ title, color, players, heroById, onOpenCard, itemCatalog })
                   <span style={styles.laneTag}>{LANE_NAMES[p.lane_role]}</span>
                 )}
               </div>
+
+              <div style={styles.playerNick}>
+                {p.personaname || (p.account_id ? `Игрок ${p.account_id}` : "Аноним")}
+              </div>
+
               <div style={{ ...styles.mutedText, fontSize: 11 }}>
                 {p.kills}/{p.deaths}/{p.assists} · KDA {kda} · {p.gold_per_min || 0} зол/мин · {p.last_hits || 0} добито
               </div>
+
+              <div style={styles.playerStatsRow}>
+                {typeof p.net_worth === "number" && (
+                  <span style={styles.playerStat} title="Общая ценность">
+                    <Gem size={10} color="#E5B33D" /> {fmtThousands(p.net_worth)}
+                  </span>
+                )}
+                {typeof p.hero_damage === "number" && (
+                  <span style={styles.playerStat} title="Урон по героям">
+                    <Swords size={10} color="#E2574C" /> {fmtThousands(p.hero_damage)}
+                  </span>
+                )}
+                {typeof p.damage_taken === "number" && (
+                  <span style={styles.playerStat} title="Получено урона">
+                    <ShieldAlertIconLike /> {fmtThousands(p.damage_taken)}
+                  </span>
+                )}
+                {typeof p.tower_damage === "number" && p.tower_damage > 0 && (
+                  <span style={styles.playerStat} title="Урон по строениям">
+                    <Network size={10} color="#5FCB8E" /> {fmtThousands(p.tower_damage)}
+                  </span>
+                )}
+              </div>
+
               <PlayerItems player={p} catalog={itemCatalog} />
             </div>
           </div>
@@ -6972,6 +7370,11 @@ const styles = {
     fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 13, color: "#C084FC",
     marginBottom: 6, textTransform: "uppercase", letterSpacing: "0.03em",
   },
+  patchGroup: { marginBottom: 10 },
+  patchGroupName: {
+    fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 13, color: "#F2EAFB",
+    marginBottom: 3,
+  },
   patchLine: { display: "flex", gap: 8, fontSize: 12, color: "#C4B8D8", lineHeight: 1.5, padding: "2px 0" },
   patchBullet: {
     width: 4, height: 4, borderRadius: "50%", background: "#6E5F86", flexShrink: 0, marginTop: 7,
@@ -7381,6 +7784,9 @@ const styles = {
     display: "flex", alignItems: "center", gap: 10, padding: "8px 0",
     borderBottom: "1px solid #241636", cursor: "pointer",
   },
+  parseBlock: {
+    background: "#1A1508", border: "1px solid #4A3D1E", borderRadius: 12, padding: 14,
+  },
   matchTag: {
     display: "inline-block", fontSize: 10, fontWeight: 600, border: "1px solid",
     borderRadius: 999, padding: "1px 8px", marginTop: 4,
@@ -7402,6 +7808,37 @@ const styles = {
   fightMap: { width: "100%", height: "auto", display: "block", borderRadius: 8 },
   fightMapLegend: {
     display: "flex", justifyContent: "center", gap: 14, fontSize: 11, marginTop: 8, flexWrap: "wrap",
+  },
+  verdictHead: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" },
+  verdictLabel: {
+    fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 22, letterSpacing: "0.02em",
+  },
+  verdictApprox: {
+    fontSize: 10, color: "#9C8FB0", border: "1px solid #3A2857", borderRadius: 999, padding: "1px 8px",
+  },
+  verdictReason: { fontSize: 13, color: "#C4B8D8", marginTop: 4, lineHeight: 1.5 },
+  personalTop: { display: "flex", gap: 14, alignItems: "center", marginBottom: 14 },
+  personalPortrait: { width: 64, height: 64, borderRadius: 10, objectFit: "cover", flexShrink: 0 },
+  personalHero: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 18 },
+  personalKda: { fontSize: 13, color: "#C4B8D8", marginTop: 2 },
+  benchIntro: { fontSize: 12, color: "#9C8FB0", marginBottom: 8 },
+  benchRow: { display: "flex", alignItems: "center", gap: 10, padding: "5px 0" },
+  benchLabel: { fontSize: 12, color: "#C4B8D8", width: 130, flexShrink: 0 },
+  benchTrack: { flex: 1, height: 7, borderRadius: 4, background: "#241636", overflow: "hidden", minWidth: 50 },
+  benchFill: { height: "100%", borderRadius: 4 },
+  benchPct: {
+    fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 13,
+    width: 42, textAlign: "right", flexShrink: 0,
+  },
+  benchSummary: {
+    fontSize: 12, color: "#C4B8D8", lineHeight: 1.5, marginTop: 12,
+    paddingTop: 12, borderTop: "1px solid #241636",
+  },
+  playerNick: { fontSize: 12, color: "#C4B8D8", marginTop: 1 },
+  playerStatsRow: { display: "flex", gap: 10, flexWrap: "wrap", marginTop: 4 },
+  playerStat: {
+    display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: "#9C8FB0",
+    fontFamily: "'Rajdhani', sans-serif", fontWeight: 600,
   },
   itemRowMatch: { display: "flex", gap: 3, flexWrap: "wrap", marginTop: 5 },
   matchItemIcon: {
