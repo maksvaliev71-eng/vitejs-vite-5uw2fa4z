@@ -6339,6 +6339,54 @@ function PersonalReview({ match, accountId, heroById, itemCatalog }) {
           )}
         </>
       )}
+
+      <PurchaseTimeline player={me} catalog={itemCatalog} />
+    </div>
+  );
+}
+
+/* Порядок покупок с минутами — есть только у разобранных матчей.
+   Мелочь вроде тангов и веток отсеиваем по цене, иначе список не читается. */
+const TIMELINE_MIN_COST = 500;
+
+function PurchaseTimeline({ player, catalog }) {
+  const items = useMemo(() => {
+    const log = player && player.purchase_log;
+    if (!Array.isArray(log) || !catalog) return [];
+    return log
+      .map((entry) => {
+        if (!entry || !entry.key) return null;
+        const data = catalog.items[entry.key];
+        if (!data || !data.cost || data.cost < TIMELINE_MIN_COST) return null;
+        return {
+          key: entry.key,
+          name: data.dname || entry.key,
+          img: data.img,
+          cost: data.cost,
+          minute: Math.max(0, Math.round((entry.time || 0) / 60)),
+        };
+      })
+      .filter(Boolean);
+  }, [player, catalog]);
+
+  if (items.length === 0) return null;
+
+  return (
+    <div style={styles.timelineWrap}>
+      <div style={styles.timelineTitle}>Порядок покупок</div>
+      <div style={styles.timelineRow}>
+        {items.map((it, i) => (
+          <div key={`${it.key}-${i}`} style={styles.timelineItem} title={`${it.name} · ${it.cost} золота`}>
+            <img
+              src={img(it.img)}
+              alt={it.name}
+              style={styles.matchItemIcon}
+              onError={(e) => { e.currentTarget.style.visibility = "hidden"; }}
+            />
+            <span style={styles.timelineMin}>{it.minute}′</span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -7829,6 +7877,16 @@ const styles = {
   benchPct: {
     fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 13,
     width: 42, textAlign: "right", flexShrink: 0,
+  },
+  timelineWrap: { marginTop: 14, paddingTop: 14, borderTop: "1px solid #241636" },
+  timelineTitle: {
+    fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 13, color: "#9C8FB0",
+    textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 8,
+  },
+  timelineRow: { display: "flex", gap: 8, overflowX: "auto", paddingBottom: 6 },
+  timelineItem: { display: "flex", flexDirection: "column", alignItems: "center", gap: 3, flexShrink: 0 },
+  timelineMin: {
+    fontSize: 10, color: "#9C8FB0", fontFamily: "'Rajdhani', sans-serif", fontWeight: 600,
   },
   benchSummary: {
     fontSize: 12, color: "#C4B8D8", lineHeight: 1.5, marginTop: 12,
