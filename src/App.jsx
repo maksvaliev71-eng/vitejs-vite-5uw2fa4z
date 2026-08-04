@@ -5322,6 +5322,38 @@ async function fetchMatchList(accountId, limit) {
   return r.json();
 }
 
+/* Классификация матча по кривой преимущества — то же, что показывает STRATZ:
+   всухую, камбек, равная игра. Считается из radiant_gold_adv, ничего не выдумано. */
+function classifyMatch(detail) {
+  const adv = detail && detail.radiant_gold_adv;
+  if (!Array.isArray(adv) || adv.length < 5 || detail.radiant_win == null) return null;
+
+  const winnerIsRadiant = detail.radiant_win;
+  // преимущество с точки зрения победителя
+  const curve = adv.map((g) => (winnerIsRadiant ? g : -g));
+  const peakDeficit = Math.min(...curve);
+  const finalLead = curve[curve.length - 1];
+  const leadChanges = curve.reduce((acc, v, i) => {
+    if (i === 0) return acc;
+    const prev = curve[i - 1];
+    return acc + ((prev < 0 && v > 0) || (prev > 0 && v < 0) ? 1 : 0);
+  }, 0);
+  const everBehind = peakDeficit < -3000;
+  const alwaysAhead = curve.every((v, i) => i < 3 || v > 0);
+
+  if (everBehind && peakDeficit < -8000) {
+    return { key: "comeback", label: "Камбек", color: "#E5B33D" };
+  }
+  if (alwaysAhead && finalLead > 20000) {
+    return { key: "stomp", label: "Всухую", color: "#5FCB8E" };
+  }
+  if (leadChanges >= 4 || (Math.abs(peakDeficit) < 6000 && finalLead < 15000)) {
+    return { key: "close", label: "Равная игра", color: "#C084FC" };
+  }
+  if (everBehind) return { key: "comeback", label: "Камбек", color: "#E5B33D" };
+  return { key: "normal", label: "Обычная", color: "#9C8FB0" };
+}
+
 const matchDetailCache = new Map();
 
 async function fetchMatchDetail(matchId) {
@@ -5367,6 +5399,37 @@ function MatchesTab({ heroes, steamId, onOpenCard }) {
       });
     return () => { cancelled = true; };
   }, [accountId, limit]);
+
+  const [tags, setTags] = useState({});
+
+  /* Метки требуют деталей каждого матча — грузим их фоном по несколько штук,
+     чтобы список появлялся сразу, а подписи подтягивались следом. */
+  useEffect(() => {
+    if (!state.list || state.list.length === 0) return;
+    let cancelled = false;
+    const queue = state.list.map((m) => m.match_id).filter((id) => id && !(id in tags));
+    if (queue.length === 0) return;
+
+    (async () => {
+      let cursor = 0;
+      async function worker() {
+        while (cursor < queue.length && !cancelled) {
+          const id = queue[cursor++];
+          try {
+            const detail = await fetchMatchDetail(id);
+            const tag = classifyMatch(detail);
+            if (!cancelled) setTags((t) => ({ ...t, [id]: tag }));
+          } catch {
+            if (!cancelled) setTags((t) => ({ ...t, [id]: null }));
+          }
+        }
+      }
+      await Promise.all([worker(), worker()]);
+    })();
+
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.list]);
 
   const heroById = (id) => heroes.find((h) => h.id === id);
 
@@ -5514,6 +5577,17 @@ function MatchesTab({ heroes, steamId, onOpenCard }) {
                       {m.kills}/{m.deaths}/{m.assists} · {Math.round((m.duration || 0) / 60)} мин
                       {d ? ` · ${d.toLocaleDateString("ru-RU")}` : ""}
                     </div>
+                    {tags[m.match_id] && (
+                      <span
+                        style={{
+                          ...styles.matchTag,
+                          color: tags[m.match_id].color,
+                          borderColor: tags[m.match_id].color,
+                        }}
+                      >
+                        {tags[m.match_id].label}
+                      </span>
+                    )}
                   </div>
                   <span style={{ ...styles.rolePct, color: won ? "#5FCB8E" : "#E2574C" }}>
                     {won ? "Победа" : "Пораж."}
@@ -5536,6 +5610,15 @@ function MatchesTab({ heroes, steamId, onOpenCard }) {
 
 function MatchDetail({ matchId, heroes, onClose, onOpenCard }) {
   const [state, setState] = useState({ loading: true, data: null, error: null });
+  const [itemCatalog, setItemCatalog] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getItemsCatalog()
+      .then((cat) => { if (!cancelled) setItemCatalog(cat); })
+      .catch(() => { /* без каталога просто не покажем предметы */ });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -5562,6 +5645,17 @@ function MatchDetail({ matchId, heroes, onClose, onOpenCard }) {
     }));
   }, [m]);
 
+  /* Срезы на ключевых минутах: сразу видно, кто вёл в начале, середине и в затяжной игре. */
+  const checkpoints = useMemo(() => {
+    if (advantage.length === 0) return [];
+    return [10, 30, 60]
+      .filter((min) => min < advantage.length)
+      .map((min) => {
+        const row = advantage[min];
+        return { minute: min, gold: row.gold, xp: row.xp };
+      });
+  }, [advantage]);
+
   return (
     <>
       <div style={styles.matchTopBar}>
@@ -5582,6 +5676,14 @@ function MatchDetail({ matchId, heroes, onClose, onOpenCard }) {
                 {m.radiant_win === true && <div style={styles.matchWinTag}>победа</div>}
               </div>
               <div style={styles.matchMeta}>
+                {(() => {
+                  const tag = classifyMatch(m);
+                  return tag ? (
+                    <div style={{ ...styles.matchTag, color: tag.color, borderColor: tag.color, marginBottom: 6 }}>
+                      {tag.label}
+                    </div>
+                  ) : null;
+                })()}
                 <div>{Math.round((m.duration || 0) / 60)} мин</div>
                 <div style={{ ...styles.mutedText, fontSize: 11 }}>
                   {m.start_time ? new Date(m.start_time * 1000).toLocaleString("ru-RU") : ""}
@@ -5594,6 +5696,34 @@ function MatchDetail({ matchId, heroes, onClose, onOpenCard }) {
               </div>
             </div>
           </div>
+
+          {checkpoints.length > 0 && (
+            <div style={styles.panel}>
+              <div style={styles.panelHeader}>
+                <History size={16} color="#C084FC" />
+                <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Ключевые минуты</span>
+              </div>
+              <div style={styles.checkpointRow}>
+                {checkpoints.map((cp) => {
+                  const leadRadiant = cp.gold >= 0;
+                  const color = Math.abs(cp.gold) < 500 ? "#C084FC" : leadRadiant ? "#5FCB8E" : "#E2574C";
+                  return (
+                    <div key={cp.minute} style={styles.checkpointCard}>
+                      <div style={styles.checkpointMin}>{cp.minute} мин</div>
+                      <div style={{ ...styles.checkpointLead, color }}>
+                        {Math.abs(cp.gold) < 500 ? "Равно" : leadRadiant ? "Radiant" : "Dire"}
+                      </div>
+                      <div style={{ ...styles.mutedText, fontSize: 11 }}>
+                        {Math.abs(cp.gold) >= 1000
+                          ? `+${(Math.abs(cp.gold) / 1000).toFixed(1)}к золота`
+                          : `+${Math.abs(cp.gold)} золота`}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {advantage.length > 3 && (
             <div style={styles.panel}>
@@ -5625,9 +5755,11 @@ function MatchDetail({ matchId, heroes, onClose, onOpenCard }) {
             </div>
           )}
 
+          <TeamfightsPanel match={m} heroById={heroById} />
+
           <div className="two-col" style={styles.twoCol}>
-            <MatchTeam title="Radiant" color="#5FCB8E" players={(m.players || []).filter((p) => p.player_slot < 128)} heroById={heroById} onOpenCard={onOpenCard} />
-            <MatchTeam title="Dire" color="#E2574C" players={(m.players || []).filter((p) => p.player_slot >= 128)} heroById={heroById} onOpenCard={onOpenCard} />
+            <MatchTeam title="Radiant" color="#5FCB8E" players={(m.players || []).filter((p) => p.player_slot < 128)} heroById={heroById} onOpenCard={onOpenCard} itemCatalog={itemCatalog} />
+            <MatchTeam title="Dire" color="#E2574C" players={(m.players || []).filter((p) => p.player_slot >= 128)} heroById={heroById} onOpenCard={onOpenCard} itemCatalog={itemCatalog} />
           </div>
         </>
       )}
@@ -5637,7 +5769,212 @@ function MatchDetail({ matchId, heroes, onClose, onOpenCard }) {
 
 const LANE_NAMES = { 1: "Сейф", 2: "Мид", 3: "Оффлейн", 4: "Джунгли" };
 
-function MatchTeam({ title, color, players, heroById, onOpenCard }) {
+/* Предметы игрока: OpenDota отдаёт их номерами, названия и картинки берём из каталога. */
+function PlayerItems({ player, catalog }) {
+  if (!catalog) return null;
+  const slots = ["item_0", "item_1", "item_2", "item_3", "item_4", "item_5"];
+  const owned = slots
+    .map((s) => player[s])
+    .filter((id) => id && id > 0)
+    .map((id) => {
+      const key = catalog.ids[String(id)];
+      return key ? { key, data: catalog.items[key] } : null;
+    })
+    .filter((x) => x && x.data);
+
+  const neutralId = player.item_neutral;
+  const neutralKey = neutralId ? catalog.ids[String(neutralId)] : null;
+  const neutral = neutralKey ? catalog.items[neutralKey] : null;
+
+  if (owned.length === 0 && !neutral) return null;
+
+  return (
+    <div style={styles.itemRowMatch}>
+      {owned.map((it, i) => (
+        <img
+          key={`${it.key}-${i}`}
+          src={img(it.data.img)}
+          alt={it.data.dname || ""}
+          title={it.data.dname || ""}
+          style={styles.matchItemIcon}
+          onError={(e) => { e.currentTarget.style.visibility = "hidden"; }}
+        />
+      ))}
+      {neutral && (
+        <img
+          src={img(neutral.img)}
+          alt={neutral.dname || ""}
+          title={`${neutral.dname || ""} (нейтральный)`}
+          style={{ ...styles.matchItemIcon, borderColor: "#E5B33D" }}
+          onError={(e) => { e.currentTarget.style.visibility = "hidden"; }}
+        />
+      )}
+    </div>
+  );
+}
+
+/* Драки. OpenDota отдаёт их только для разобранных матчей — если разбора нет,
+   массив пустой, и блок просто не показывается. Координаты смертей реальные. */
+function TeamfightsPanel({ match, heroById }) {
+  const fights = useMemo(() => {
+    const raw = match && match.teamfights;
+    if (!Array.isArray(raw) || raw.length === 0) return [];
+    return raw
+      .map((tf) => {
+        const players = Array.isArray(tf.players) ? tf.players : [];
+        let radiantGold = 0;
+        let direGold = 0;
+        let radiantDeaths = 0;
+        let direDeaths = 0;
+        const points = [];
+
+        players.forEach((pl, idx) => {
+          const isRadiant = idx < 5;
+          const gold = pl && typeof pl.gold_delta === "number" ? pl.gold_delta : 0;
+          if (isRadiant) radiantGold += gold;
+          else direGold += gold;
+          if (pl && pl.deaths > 0) {
+            if (isRadiant) radiantDeaths += pl.deaths;
+            else direDeaths += pl.deaths;
+          }
+          const dp = pl && pl.deaths_pos;
+          if (dp && typeof dp === "object") {
+            Object.entries(dp).forEach(([x, ys]) => {
+              if (!ys || typeof ys !== "object") return;
+              Object.keys(ys).forEach((y) => {
+                points.push({ x: Number(x), y: Number(y), radiant: isRadiant });
+              });
+            });
+          }
+        });
+
+        return {
+          start: tf.start,
+          end: tf.end,
+          deaths: tf.deaths || radiantDeaths + direDeaths,
+          radiantGold,
+          direGold,
+          radiantDeaths,
+          direDeaths,
+          points,
+        };
+      })
+      .filter((f) => f.deaths > 0);
+  }, [match]);
+
+  const [openIndex, setOpenIndex] = useState(0);
+
+  if (fights.length === 0) {
+    return (
+      <div style={styles.panel}>
+        <div style={styles.panelHeader}>
+          <Swords size={16} color="#C084FC" />
+          <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Командные драки</span>
+        </div>
+        <div style={styles.emptyState}>
+          Для этого матча нет подробного разбора — драки доступны только у обработанных игр.
+        </div>
+      </div>
+    );
+  }
+
+  const active = fights[Math.min(openIndex, fights.length - 1)];
+
+  return (
+    <div style={styles.panel}>
+      <div style={styles.panelHeader}>
+        <Swords size={16} color="#C084FC" />
+        <span style={{ ...styles.panelTitle, color: "#C084FC" }}>
+          Командные драки ({fights.length})
+        </span>
+      </div>
+
+      <div className="rank-scroll" style={styles.fightTabs}>
+        {fights.map((f, i) => {
+          const swing = f.radiantGold - f.direGold;
+          const color = Math.abs(swing) < 500 ? "#C084FC" : swing > 0 ? "#5FCB8E" : "#E2574C";
+          return (
+            <button
+              key={i}
+              style={{
+                ...styles.fightTab,
+                borderColor: i === openIndex ? color : "#2C1C42",
+                color: i === openIndex ? color : "#9C8FB0",
+              }}
+              onClick={() => setOpenIndex(i)}
+            >
+              {Math.round((f.start || 0) / 60)} мин
+            </button>
+          );
+        })}
+      </div>
+
+      <div style={styles.fightSummary}>
+        <div>
+          <div style={styles.fightStat}>{active.deaths}</div>
+          <div style={styles.fightStatLabel}>смертей</div>
+        </div>
+        <div>
+          <div style={{ ...styles.fightStat, color: "#5FCB8E" }}>
+            {active.radiantGold > 0 ? `+${active.radiantGold}` : active.radiantGold}
+          </div>
+          <div style={styles.fightStatLabel}>золото Radiant</div>
+        </div>
+        <div>
+          <div style={{ ...styles.fightStat, color: "#E2574C" }}>
+            {active.direGold > 0 ? `+${active.direGold}` : active.direGold}
+          </div>
+          <div style={styles.fightStatLabel}>золото Dire</div>
+        </div>
+      </div>
+
+      <FightMap points={active.points} />
+    </div>
+  );
+}
+
+/* Карта нарисована схематично: реки, лесов и точных построек тут нет — только
+   ориентиры лайнов, чтобы понимать, в какой части карты случилась драка. */
+function FightMap({ points }) {
+  const valid = (points || []).filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+  if (valid.length === 0) return null;
+
+  // игровые координаты примерно 64..192 приводим к 0..100
+  const norm = (v) => Math.max(0, Math.min(100, ((v - 64) / 128) * 100));
+
+  return (
+    <div style={styles.fightMapWrap}>
+      <svg viewBox="0 0 100 100" style={styles.fightMap}>
+        <rect x="0" y="0" width="100" height="100" fill="#0E081A" rx="4" />
+        <polygon points="0,100 100,0 100,12 12,100" fill="#1B2A20" opacity="0.7" />
+        <polygon points="0,88 88,0 100,0 0,100" fill="#2A1520" opacity="0.5" />
+        <line x1="8" y1="92" x2="92" y2="8" stroke="#2F4A6B" strokeWidth="2.5" opacity="0.6" />
+        <line x1="6" y1="88" x2="6" y2="12" stroke="#3A2857" strokeWidth="1.5" />
+        <line x1="12" y1="94" x2="88" y2="94" stroke="#3A2857" strokeWidth="1.5" />
+        <line x1="94" y1="88" x2="94" y2="12" stroke="#3A2857" strokeWidth="1.5" />
+        <line x1="12" y1="6" x2="88" y2="6" stroke="#3A2857" strokeWidth="1.5" />
+
+        {valid.map((p, i) => (
+          <circle
+            key={i}
+            cx={norm(p.x)}
+            cy={100 - norm(p.y)}
+            r="2.4"
+            fill={p.radiant ? "#5FCB8E" : "#E2574C"}
+            stroke="#07050D"
+            strokeWidth="0.6"
+          />
+        ))}
+      </svg>
+      <div style={styles.fightMapLegend}>
+        <span style={{ color: "#5FCB8E" }}>● погибшие Radiant</span>
+        <span style={{ color: "#E2574C" }}>● погибшие Dire</span>
+      </div>
+    </div>
+  );
+}
+
+function MatchTeam({ title, color, players, heroById, onOpenCard, itemCatalog }) {
   return (
     <div style={{ ...styles.panel, borderTop: `3px solid ${color}` }}>
       <div style={styles.panelHeader}>
@@ -5659,6 +5996,7 @@ function MatchTeam({ title, color, players, heroById, onOpenCard }) {
               <div style={{ ...styles.mutedText, fontSize: 11 }}>
                 {p.kills}/{p.deaths}/{p.assists} · KDA {kda} · {p.gold_per_min || 0} зол/мин · {p.last_hits || 0} добито
               </div>
+              <PlayerItems player={p} catalog={itemCatalog} />
             </div>
           </div>
         );
@@ -7042,6 +7380,42 @@ const styles = {
   matchPlayer: {
     display: "flex", alignItems: "center", gap: 10, padding: "8px 0",
     borderBottom: "1px solid #241636", cursor: "pointer",
+  },
+  matchTag: {
+    display: "inline-block", fontSize: 10, fontWeight: 600, border: "1px solid",
+    borderRadius: 999, padding: "1px 8px", marginTop: 4,
+    fontFamily: "'Rajdhani', sans-serif", letterSpacing: "0.03em",
+  },
+  fightTabs: { display: "flex", gap: 6, overflowX: "auto", paddingBottom: 4, marginBottom: 12 },
+  fightTab: {
+    flexShrink: 0, background: "transparent", border: "1px solid", borderRadius: 999,
+    padding: "4px 12px", fontSize: 12, cursor: "pointer",
+    fontFamily: "'Rajdhani', sans-serif", fontWeight: 600,
+  },
+  fightSummary: {
+    display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10,
+    textAlign: "center", marginBottom: 14,
+  },
+  fightStat: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 20 },
+  fightStatLabel: { fontSize: 11, color: "#9C8FB0" },
+  fightMapWrap: { maxWidth: 320, margin: "0 auto" },
+  fightMap: { width: "100%", height: "auto", display: "block", borderRadius: 8 },
+  fightMapLegend: {
+    display: "flex", justifyContent: "center", gap: 14, fontSize: 11, marginTop: 8, flexWrap: "wrap",
+  },
+  itemRowMatch: { display: "flex", gap: 3, flexWrap: "wrap", marginTop: 5 },
+  matchItemIcon: {
+    width: 30, height: 22, borderRadius: 3, objectFit: "cover",
+    border: "1px solid #2F1F49", background: "#0E081A",
+  },
+  checkpointRow: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))", gap: 10 },
+  checkpointCard: {
+    background: "#0E081A", border: "1px solid #2C1C42", borderRadius: 10,
+    padding: "10px 12px", textAlign: "center",
+  },
+  checkpointMin: { fontSize: 11, color: "#9C8FB0" },
+  checkpointLead: {
+    fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 16, margin: "2px 0",
   },
   laneTag: {
     marginLeft: 8, fontSize: 10, color: "#9C8FB0", border: "1px solid #3A2857",
