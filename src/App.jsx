@@ -975,6 +975,22 @@ export default function App() {
         .recharts-wrapper *:focus, .recharts-wrapper *:focus-visible { outline: none !important; }
         .recharts-tooltip-wrapper { outline: none !important; }
         input, select, textarea { font-size: 16px !important; }
+        @keyframes boltFlash {
+          0%, 84%, 100% { opacity: 0; }
+          86% { opacity: 0.9; }
+          88% { opacity: 0.15; }
+          90% { opacity: 0.75; }
+          94% { opacity: 0; }
+        }
+        .rank-bolt { animation: boltFlash 6s ease-in-out infinite; }
+        @keyframes avatarPulse {
+          0%, 100% { transform: scale(1); }
+          50% { transform: scale(1.03); }
+        }
+        .rank-avatar { animation: avatarPulse 4s ease-in-out infinite; }
+        @media (prefers-reduced-motion: reduce) {
+          .rank-bolt, .rank-avatar { animation: none !important; }
+        }
         .home-text-col { text-align: left; }
         .rank-scroll { overflow-x: auto; scrollbar-width: none; }
         .rank-scroll::-webkit-scrollbar { display: none; }
@@ -989,6 +1005,8 @@ export default function App() {
           .home-hero { flex-direction: column !important; gap: 20px !important; }
           .hero-portrait-wrap { margin: 0 !important; }
           .home-text-col { text-align: center !important; }
+          .profile-header { flex-direction: column !important; text-align: center; }
+          .profile-header > div:last-child { margin-left: 0 !important; }
           .home-text-col p { margin-left: auto !important; margin-right: auto !important; }
           .home-text-col button { margin-left: auto !important; margin-right: auto !important; }
         }
@@ -1481,12 +1499,126 @@ function DashCard({ title, icon: Icon, color, rows, onOpenHero }) {
 
 const MONTH_RU = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
 
+/* Ранг приходит от OpenDota полем rank_tier: десятки — медаль, единицы — звёзды.
+   Цвета подобраны близко к тому, как медали выглядят в игре. */
+const RANK_TIERS = [
+  { medal: 1, name: "Рекрут", color: "#C08552", glow: "rgba(192,133,82,0.40)" },
+  { medal: 2, name: "Страж", color: "#5FCB8E", glow: "rgba(95,203,142,0.40)" },
+  { medal: 3, name: "Рыцарь", color: "#8FB8E8", glow: "rgba(143,184,232,0.40)" },
+  // индиго, а не сиреневый: иначе сливается с основным акцентом сайта
+  { medal: 4, name: "Герой", color: "#6C5CE7", glow: "rgba(108,92,231,0.45)" },
+  { medal: 5, name: "Легенда", color: "#E86BB0", glow: "rgba(232,107,176,0.40)" },
+  { medal: 6, name: "Властелин", color: "#2FD4CB", glow: "rgba(47,212,203,0.40)" },
+  { medal: 7, name: "Божество", color: "#4E9BFF", glow: "rgba(78,155,255,0.45)" },
+  { medal: 8, name: "Титан", color: "#F0C044", glow: "rgba(240,192,68,0.50)" },
+];
+
+const DEFAULT_RANK_THEME = { name: null, color: "#C084FC", glow: "rgba(178,75,243,0.35)", stars: 0 };
+
+function rankTheme(profile) {
+  const tier = profile && profile.rank_tier;
+  if (!tier) return DEFAULT_RANK_THEME;
+  const medal = Math.floor(tier / 10);
+  const stars = tier % 10;
+  const found = RANK_TIERS.find((r) => r.medal === medal);
+  if (!found) return DEFAULT_RANK_THEME;
+  return { ...found, stars };
+}
+
+/* Картинка медали. Точный адрес официальных иконок подтвердить не удалось, поэтому
+   пробуем несколько источников и при неудаче рисуем свою медаль — она не зависит
+   ни от какого внешнего сервиса. */
+const RANK_ICON_SOURCES = [
+  (m) => `https://www.opendota.com/assets/images/dota2/rank_icons/rank_icon_${m}.png`,
+  (m) => `https://cdn.cloudflare.steamstatic.com/apps/dota2/images/dota_react/icons/ranks/rank_icon_${m}.png`,
+];
+
+function RankMedal({ theme, size = 72 }) {
+  const [srcIndex, setSrcIndex] = useState(0);
+  const medal = theme.medal;
+
+  const drawn = (
+    <svg width={size} height={size} viewBox="0 0 72 72" style={{ display: "block" }}>
+      <defs>
+        <radialGradient id={`medal-g-${medal || 0}`} cx="50%" cy="38%" r="65%">
+          <stop offset="0%" stopColor={theme.color} stopOpacity="0.95" />
+          <stop offset="100%" stopColor={theme.color} stopOpacity="0.25" />
+        </radialGradient>
+      </defs>
+      <polygon
+        points="36,4 62,18 62,48 36,66 10,48 10,18"
+        fill={`url(#medal-g-${medal || 0})`}
+        stroke={theme.color}
+        strokeWidth="2.5"
+      />
+      <polygon
+        points="36,14 53,24 53,44 36,55 19,44 19,24"
+        fill="none"
+        stroke={theme.color}
+        strokeWidth="1"
+        opacity="0.5"
+      />
+      <text
+        x="36"
+        y="42"
+        textAnchor="middle"
+        fill="#0A0611"
+        fontFamily="'Rajdhani', sans-serif"
+        fontWeight="700"
+        fontSize="24"
+      >
+        {medal || "?"}
+      </text>
+    </svg>
+  );
+
+  if (!medal || srcIndex >= RANK_ICON_SOURCES.length) return drawn;
+
+  return (
+    <img
+      src={RANK_ICON_SOURCES[srcIndex](medal)}
+      alt={theme.name || "Ранг"}
+      width={size}
+      height={size}
+      style={{ display: "block", filter: `drop-shadow(0 0 10px ${theme.glow})` }}
+      onError={() => setSrcIndex((i) => i + 1)}
+    />
+  );
+}
+
+/* Молнии в цвет ранга: чистый SVG, без картинок и внешних зависимостей. */
+function RankLightning({ color }) {
+  const bolts = [
+    "M 18 6 L 12 26 L 20 24 L 13 46",
+    "M 52 10 L 46 28 L 54 26 L 47 44",
+    "M 34 2 L 28 18 L 36 16 L 30 34",
+  ];
+  return (
+    <svg style={styles.lightningLayer} viewBox="0 0 72 52" preserveAspectRatio="none" aria-hidden="true">
+      {bolts.map((d, i) => (
+        <path
+          key={i}
+          d={d}
+          className="rank-bolt"
+          style={{ animationDelay: `${i * 1.3}s` }}
+          fill="none"
+          stroke={color}
+          strokeWidth="1.6"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      ))}
+    </svg>
+  );
+}
+
 function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
   const [premium] = usePremium();
   const [input, setInput] = useState("");
   const [accountId, setAccountId] = useState(null);
   const [parseError, setParseError] = useState(null);
   const { loading, data, error } = usePlayerBundle(accountId);
+  const theme = useMemo(() => rankTheme(data && data.profile), [data]);
 
   useEffect(() => {
     if (!steamIdFromUrl) return;
@@ -1583,23 +1715,71 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
 
       {!loading && !error && data && (
         <>
-          <div style={styles.panel}>
-            <div style={styles.profileHeader}>
+          <div style={{ ...styles.panel, position: "relative", overflow: "hidden", borderTop: `3px solid ${theme.color}`, boxShadow: `0 0 40px ${theme.glow}` }}>
+            <RankLightning color={theme.color} />
+            <div className="profile-header" style={styles.profileHeader}>
               {data.profile?.profile?.avatarfull && (
-                <img src={data.profile.profile.avatarfull} alt="" style={styles.profileAvatar} />
+                <div style={styles.avatarWrap}>
+                  <img
+                    src={data.profile.profile.avatarfull}
+                    alt=""
+                    className="rank-avatar"
+                    style={{ ...styles.profileAvatar, borderColor: theme.color, boxShadow: `0 0 18px ${theme.glow}` }}
+                  />
+                </div>
               )}
-              <div>
+              <div style={{ minWidth: 0 }}>
                 <div style={styles.profileName}>{data.profile?.profile?.personaname || "Игрок"}</div>
-                <div style={styles.mutedText}>
+
+                <div style={styles.rankRow}>
+                  {theme.name ? (
+                    <span style={{ ...styles.rankBadge, color: theme.color, borderColor: theme.color }}>
+                      {theme.name}
+                      {theme.stars > 0 ? ` ${theme.stars}` : ""}
+                    </span>
+                  ) : (
+                    <span style={{ ...styles.rankBadge, color: "#9C8FB0", borderColor: "#3A2857" }}>
+                      Ранг скрыт
+                    </span>
+                  )}
+                  {premium && (
+                    <span style={{ ...styles.rankBadge, color: "#E5B33D", borderColor: "#4A3D1E" }}>
+                      <Gem size={11} /> Premium
+                    </span>
+                  )}
+                </div>
+
+                <div style={{ ...styles.mutedText, marginTop: 6 }}>
                   {data.wl.win + data.wl.lose > 0
                     ? `${data.wl.win} побед / ${data.wl.lose} поражений (${((data.wl.win / (data.wl.win + data.wl.lose)) * 100).toFixed(1)}%)`
                     : "Нет данных о матчах"}
                 </div>
               </div>
+
+              {theme.name && (
+                <div style={styles.medalWrap}>
+                  <RankMedal theme={theme} />
+                  <div style={{ ...styles.medalName, color: theme.color }}>{theme.name}</div>
+                  {theme.stars > 0 && (
+                    <div style={styles.starRow}>
+                      {Array.from({ length: 5 }).map((_, i) => (
+                        <span
+                          key={i}
+                          style={{
+                            ...styles.star,
+                            background: i < theme.stars ? theme.color : "#2F1F49",
+                            boxShadow: i < theme.stars ? `0 0 6px ${theme.glow}` : "none",
+                          }}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 
-          <ProfileCharts matches={data.matches} wl={data.wl} heroes={heroes} onOpenCard={onOpenCard} />
+          <ProfileCharts matches={data.matches} wl={data.wl} heroes={heroes} onOpenCard={onOpenCard} theme={theme} />
 
           {monthlyTrend.length > 0 && (
             <div style={styles.panel}>
@@ -1798,7 +1978,7 @@ function RecentMatchesPanel({ recent, heroes, onOpenCard }) {
   );
 }
 
-function ProfileCharts({ matches, wl, heroes, onOpenCard }) {
+function ProfileCharts({ matches, wl, heroes, onOpenCard, theme = DEFAULT_RANK_THEME }) {
   const stats = useMemo(() => {
     const list = Array.isArray(matches) ? matches.filter((m) => m.player_slot != null && m.radiant_win != null) : [];
     if (list.length === 0) return null;
@@ -1930,10 +2110,10 @@ function ProfileCharts({ matches, wl, heroes, onOpenCard }) {
   return (
     <>
       <div className="two-col" style={styles.twoCol}>
-        <div style={styles.panel}>
+        <div style={{ ...styles.panel, borderTop: `2px solid ${theme.color}` }}>
           <div style={styles.panelHeader}>
-            <BarChart3 size={16} color="#C084FC" />
-            <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Победы и поражения</span>
+            <BarChart3 size={16} color={theme.color} />
+            <span style={{ ...styles.panelTitle, color: theme.color }}>Победы и поражения</span>
           </div>
           {total > 0 ? (
             <div style={{ position: "relative", width: "100%", height: 200 }}>
@@ -1973,10 +2153,10 @@ function ProfileCharts({ matches, wl, heroes, onOpenCard }) {
           )}
         </div>
 
-        <div style={styles.panel}>
+        <div style={{ ...styles.panel, borderTop: `2px solid ${theme.color}` }}>
           <div style={styles.panelHeader}>
-            <Gem size={16} color="#C084FC" />
-            <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Средние показатели</span>
+            <Gem size={16} color={theme.color} />
+            <span style={{ ...styles.panelTitle, color: theme.color }}>Средние показатели</span>
           </div>
           <div style={styles.statsGrid}>
             <Stat label="KDA" value={stats.kda} />
@@ -5000,7 +5180,27 @@ const CM_SEQUENCE = [
   ["radiant", "pick"], ["dire", "pick"],
 ];
 
-const CM_POOL_SIZE = 60;
+/* Кого команда ещё может взять: не больше трёх кор-героев и минимум два саппорта,
+   иначе бот собирает пять керри. Роли берём из тегов OpenDota — других данных нет. */
+function isCore(h) {
+  return (h.roles || []).includes("Carry");
+}
+function isSupport(h) {
+  return (h.roles || []).includes("Support");
+}
+
+function roleAllowed(hero, teamHeroes) {
+  const slotsLeft = 5 - teamHeroes.length;
+  const cores = teamHeroes.filter(isCore).length;
+  const supports = teamHeroes.filter(isSupport).length;
+  const supportsNeeded = Math.max(0, 2 - supports);
+
+  // мест осталось ровно столько, сколько нужно саппортов — берём только их
+  if (slotsLeft <= supportsNeeded && !isSupport(hero)) return false;
+  // больше трёх кор-героев в команде не нужно
+  if (isCore(hero) && !isSupport(hero) && cores >= 3) return false;
+  return true;
+}
 
 function CaptainsModeTab({ heroes }) {
   const [side, setSide] = useState("radiant");
@@ -5013,12 +5213,14 @@ function CaptainsModeTab({ heroes }) {
   const [query, setQuery] = useState("");
   const [, force] = useState(0);
 
-  // ограничиваем пул популярными героями: иначе нужны матчапы на все 124
-  const pool = useMemo(() => {
+  // выбирать можно любого героя; оценки считаются по тем, для кого загружены матчапы
+  const pool = heroes;
+
+  // порядок подгрузки: сначала популярные, они чаще всего и нужны для оценок
+  const preloadOrder = useMemo(() => {
     return [...heroes]
       .map((h) => ({ hero: h, picks: bracketStats(h, BRACKETS[0]).picks }))
       .sort((a, b) => b.picks - a.picks)
-      .slice(0, CM_POOL_SIZE)
       .map((x) => x.hero);
   }, [heroes]);
 
@@ -5032,7 +5234,7 @@ function CaptainsModeTab({ heroes }) {
     if (!started) return;
     let cancelled = false;
     (async () => {
-      for (const h of pool.slice(0, 30)) {
+      for (const h of preloadOrder.slice(0, 60)) {
         if (publicMatchupsCache.has(h.id) || matchupsCache.has(h.id)) continue;
         try {
           await getPublicMatchups(h.id);
@@ -5081,8 +5283,13 @@ function CaptainsModeTab({ heroes }) {
   }
 
   function rankCandidates(forSide, action) {
+    const teamIds = forSide === "radiant" ? picks.radiant : picks.dire;
+    const teamHeroes = teamIds.map((id) => heroes.find((h) => h.id === id)).filter(Boolean);
+
     return pool
       .filter((h) => !usedIds.has(h.id))
+      // для пика соблюдаем состав команды; бан ролью не ограничен
+      .filter((h) => (action === "pick" ? roleAllowed(h, teamHeroes) : true))
       .map((h) => ({ hero: h, score: scoreFor(h.id, forSide, action) }))
       .filter((x) => x.score != null)
       .sort((a, b) => b.score - a.score);
@@ -5136,7 +5343,10 @@ function CaptainsModeTab({ heroes }) {
       if (pickFrom && pickFrom.length) {
         chosen = pickFrom[Math.floor(Math.random() * pickFrom.length)].hero.id;
       } else {
-        const free = pool.filter((h) => !usedIds.has(h.id));
+        const teamIds = currentSide === "radiant" ? picks.radiant : picks.dire;
+        const teamHeroes = teamIds.map((id) => heroes.find((h) => h.id === id)).filter(Boolean);
+        let free = pool.filter((h) => !usedIds.has(h.id));
+        if (currentAction === "pick") free = free.filter((h) => roleAllowed(h, teamHeroes));
         if (free.length === 0) return;
         chosen = free[Math.floor(Math.random() * free.length)].id;
       }
@@ -5157,11 +5367,22 @@ function CaptainsModeTab({ heroes }) {
 
   const heroById = (id) => heroes.find((h) => h.id === id);
 
-  const filtered = useMemo(() => {
+  const grouped = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const free = pool.filter((h) => !usedIds.has(h.id));
-    if (!q) return free;
-    return free.filter((h) => h.localized_name.toLowerCase().includes(q));
+    let free = pool.filter((h) => !usedIds.has(h.id));
+    if (q) free = free.filter((h) => h.localized_name.toLowerCase().includes(q));
+
+    const order = ["str", "agi", "int", "all"];
+    return order
+      .map((key) => ({
+        key,
+        label: (ATTR[key] || ATTR.all).label,
+        color: (ATTR[key] || ATTR.all).color,
+        list: free
+          .filter((h) => (ATTR[h.primary_attr] ? h.primary_attr : "all") === key)
+          .sort((a, b) => a.localized_name.localeCompare(b.localized_name)),
+      }))
+      .filter((g) => g.list.length > 0);
   }, [pool, usedIds, query]);
 
   if (!started) {
@@ -5261,6 +5482,15 @@ function CaptainsModeTab({ heroes }) {
         </div>
       )}
 
+      {finished && (
+        <CmVerdict
+          radiant={picks.radiant}
+          dire={picks.dire}
+          side={side}
+          pairWinRate={pairWinRate}
+        />
+      )}
+
       {finished && <CmReview history={history} heroById={heroById} side={side} />}
 
       {!finished && isMyTurn && (
@@ -5293,17 +5523,94 @@ function CaptainsModeTab({ heroes }) {
                 onChange={(e) => setQuery(e.target.value)}
               />
             </div>
-            <div style={styles.cmGrid}>
-              {filtered.map((h) => (
-                <button key={h.id} style={styles.cmCell} onClick={() => applyChoice(h.id, true)} title={h.localized_name}>
-                  <HeroIcon hero={h} style={styles.cmCellIcon} />
-                  <span style={styles.cmCellName}>{h.localized_name}</span>
-                </button>
+            <div style={styles.cmGroups}>
+              {grouped.map((g) => (
+                <div key={g.key}>
+                  <div style={{ ...styles.cmGroupTitle, color: g.color, borderColor: g.color }}>
+                    {g.label} · {g.list.length}
+                  </div>
+                  <div style={styles.cmGrid}>
+                    {g.list.map((h) => (
+                      <button
+                        key={h.id}
+                        style={{ ...styles.cmCell, borderColor: g.color + "55" }}
+                        onClick={() => applyChoice(h.id, true)}
+                        title={h.localized_name}
+                      >
+                        <HeroIcon hero={h} style={styles.cmCellIcon} />
+                        <span style={styles.cmCellName}>{h.localized_name}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
               ))}
             </div>
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+/* Итог драфта считается так же, как в разделе «Драфт 5×5»: среднее реальных винрейтов
+   по всем парам героев из противоположных команд. */
+function CmVerdict({ radiant, dire, side, pairWinRate }) {
+  const pairs = [];
+  radiant.forEach((r) => {
+    dire.forEach((d) => {
+      const wr = pairWinRate(r, d);
+      if (wr != null) pairs.push(wr);
+    });
+  });
+
+  if (pairs.length === 0) {
+    return (
+      <div style={styles.panel}>
+        <div style={styles.emptyState}>
+          Не хватает данных по этим героям, чтобы оценить итог драфта.
+        </div>
+      </div>
+    );
+  }
+
+  const radiantShare = pairs.reduce((s, v) => s + v, 0) / pairs.length;
+  const radiantFavoured = radiantShare >= 0.5;
+  const pct = Math.round((radiantFavoured ? radiantShare : 1 - radiantShare) * 100);
+  const margin = Math.abs(radiantShare - 0.5) * 200;
+  const equal = margin < 3;
+  const youWin = radiantFavoured === (side === "radiant");
+  const color = equal ? "#C084FC" : youWin ? "#5FCB8E" : "#E2574C";
+
+  return (
+    <div style={{ ...styles.panel, borderTop: `3px solid ${color}` }}>
+      <div style={styles.panelHeader}>
+        <Swords size={16} color={color} />
+        <span style={{ ...styles.panelTitle, color }}>Итог драфта</span>
+      </div>
+
+      <div style={styles.cmVerdictRow}>
+        <div>
+          <div style={{ ...styles.vsPct, color }}>{equal ? "50%" : `${pct}%`}</div>
+          <div style={{ ...styles.vsWinner, color }}>
+            {equal
+              ? "Составы примерно равны"
+              : `Сильнее ${radiantFavoured ? "Radiant" : "Dire"}${youWin ? " — это ты" : ""}`}
+          </div>
+        </div>
+        <div style={styles.cmVerdictBarWrap}>
+          <div style={styles.cmVerdictBar}>
+            <div style={{ ...styles.cmVerdictFill, width: `${Math.round(radiantShare * 100)}%` }} />
+          </div>
+          <div style={styles.cmVerdictLegend}>
+            <span style={{ color: "#5FCB8E" }}>Radiant {Math.round(radiantShare * 100)}%</span>
+            <span style={{ color: "#E2574C" }}>Dire {100 - Math.round(radiantShare * 100)}%</span>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ ...styles.mutedText, fontSize: 11, marginTop: 8 }}>
+        По {pairs.length} парам героев из {radiant.length * dire.length} возможных
+      </div>
     </div>
   );
 }
@@ -6119,6 +6426,27 @@ const styles = {
   streakChip: {
     fontSize: 11, padding: "5px 11px", borderRadius: 999, border: "1px solid", fontWeight: 600,
   },
+  lightningLayer: {
+    position: "absolute", top: 0, left: 0, right: 0, height: 90,
+    pointerEvents: "none", opacity: 0.55,
+  },
+  avatarWrap: { position: "relative", flexShrink: 0 },
+  medalWrap: {
+    marginLeft: "auto", display: "flex", flexDirection: "column", alignItems: "center",
+    gap: 4, flexShrink: 0,
+  },
+  medalName: {
+    fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 13,
+    letterSpacing: "0.04em", textTransform: "uppercase",
+  },
+  starRow: { display: "flex", gap: 4 },
+  star: { width: 7, height: 7, borderRadius: "50%" },
+  rankRow: { display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 },
+  rankBadge: {
+    display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 600,
+    border: "1px solid", borderRadius: 999, padding: "2px 10px",
+    fontFamily: "'Rajdhani', sans-serif", letterSpacing: "0.03em",
+  },
   profileName: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 18 },
   roleGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 16 },
   banGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 4, columnGap: 24 },
@@ -6190,6 +6518,16 @@ const styles = {
     fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 13, color: "#9C8FB0",
     textTransform: "uppercase", letterSpacing: "0.04em", margin: "14px 0 6px",
   },
+  cmGroups: { display: "flex", flexDirection: "column", gap: 14, marginTop: 12, maxHeight: 420, overflowY: "auto" },
+  cmGroupTitle: {
+    fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 12, textTransform: "uppercase",
+    letterSpacing: "0.04em", borderLeft: "3px solid", paddingLeft: 8, marginBottom: 8,
+  },
+  cmVerdictRow: { display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" },
+  cmVerdictBarWrap: { flex: 1, minWidth: 180 },
+  cmVerdictBar: { height: 10, borderRadius: 5, background: "#E2574C", overflow: "hidden" },
+  cmVerdictFill: { height: "100%", background: "#5FCB8E" },
+  cmVerdictLegend: { display: "flex", justifyContent: "space-between", fontSize: 11, marginTop: 6 },
   cmMistake: { padding: "6px 0", borderBottom: "1px solid #241636" },
   cmMistakeNote: { fontSize: 12, color: "#C4B8D8", marginLeft: 30, marginTop: 2 },
   reasonRow: { display: "flex", gap: 8, fontSize: 13, color: "#C4B8D8", lineHeight: 1.5, padding: "5px 0" },
