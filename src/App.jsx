@@ -797,6 +797,7 @@ const TABS = [
   { key: "web", label: "Паутина", icon: Network },
   { key: "roles", label: "Топ по ролям", icon: Crown },
   { key: "draft", label: "Драфт 5×5", icon: Users },
+  { key: "captains", label: "Тренажёр драфта", icon: Swords },
   { key: "compare", label: "Сравнить героев", icon: GitCompare },
   { key: "reference", label: "Справочник", icon: BookOpen },
   { key: "patches", label: "Патчи", icon: History },
@@ -1034,20 +1035,156 @@ export default function App() {
           {tab === "web" && <CounterWebTab heroes={heroes} onPick={(id) => setSelectedId(id)} />}
           {tab === "roles" && <RolesTab heroes={heroes} onPick={(id) => { setSelectedId(id); setTab("card"); }} />}
           {tab === "draft" && <DraftTab heroes={heroes} onOpenCard={(id) => { setSelectedId(id); setTab("card"); }} />}
+          {tab === "captains" && <CaptainsModeTab heroes={heroes} />}
           {tab === "compare" && <CompareTab heroes={heroes} />}
           {tab === "reference" && <ReferenceTab heroes={heroes} />}
           {tab === "patches" && <PatchesTab />}
           {tab === "profile" && <ProfileTab heroes={heroes} steamIdFromUrl={steamIdFromUrl} onOpenCard={(id) => { setSelectedId(id); setTab("card"); }} />}
-          {tab === "pricing" && <PricingTab />}
+          {tab === "pricing" && <PricingTab onOpenLegal={setTab} />}
+          {tab === "offer" && <LegalPage doc={LEGAL_OFFER} />}
+          {tab === "privacy" && <LegalPage doc={LEGAL_PRIVACY} />}
         </div>
       )}
 
       <Toast message={toast} onClose={() => setToast(null)} />
       {showTour && <TourOverlay onClose={closeTour} onGo={(k) => { setTab(k); closeTour(); }} />}
 
+      <footer style={styles.footer}>
+        <div style={styles.footerLinks}>
+          <button style={styles.footerLink} onClick={() => setTab("offer")}>Оферта</button>
+          <span style={styles.footerSep}>·</span>
+          <button style={styles.footerLink} onClick={() => setTab("privacy")}>Обработка данных</button>
+          <span style={styles.footerSep}>·</span>
+          <button style={styles.footerLink} onClick={() => setTab("pricing")}>Тарифы</button>
+        </div>
+        <div style={{ marginTop: 8 }}>
+          DraftHex не связан с Valve Corporation. Dota 2 — товарный знак Valve Corporation.
+        </div>
+      </footer>
     </div>
   );
 }
+
+/* ---------- правовые страницы ---------- */
+
+function LegalPage({ doc }) {
+  return (
+    <div style={styles.body}>
+      <div style={styles.panel}>
+        <h2 style={styles.legalTitle}>{doc.title}</h2>
+        <div style={styles.legalMeta}>Редакция от {doc.date}</div>
+
+        {doc.draft && (
+          <div style={styles.legalDraftNote}>
+            Черновик. Перед приёмом платежей подставь свои реквизиты вместо полей в скобках
+            и сверь текст с требованиями платёжного сервиса.
+          </div>
+        )}
+
+        {doc.sections.map((s) => (
+          <div key={s.heading} style={styles.legalSection}>
+            <div style={styles.legalHeading}>{s.heading}</div>
+            {s.items.map((item, i) => (
+              <p key={i} style={styles.legalText}>{item}</p>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+const LEGAL_OFFER = {
+  title: "Публичная оферта",
+  date: "[дата]",
+  draft: true,
+  sections: [
+    {
+      heading: "1. Общие положения",
+      items: [
+        "1.1. Настоящий документ является публичной офертой [ИП / самозанятого Фамилия Имя Отчество], ИНН [ИНН] (далее — Исполнитель), и содержит условия предоставления доступа к платным функциям сайта draft-hex-dota.ru (далее — Сервис).",
+        "1.2. Оплата подписки означает полное согласие с условиями настоящей оферты.",
+      ],
+    },
+    {
+      heading: "2. Предмет",
+      items: [
+        "2.1. Исполнитель предоставляет доступ к расширенным функциям Сервиса на выбранный срок: углублённая статистика профиля, прогноз по ходу игры, сохранение драфтов и иные функции, отмеченные как Premium.",
+        "2.2. Сервис предоставляется «как есть». Статистика носит справочный характер и не гарантирует какого-либо результата в игре.",
+      ],
+    },
+    {
+      heading: "3. Стоимость и оплата",
+      items: [
+        "3.1. Стоимость подписки: [сумма] рублей за [период].",
+        "3.2. Оплата производится через платёжный сервис [название]. Исполнитель не хранит данные банковских карт.",
+        "3.3. Доступ активируется автоматически после подтверждения оплаты.",
+      ],
+    },
+    {
+      heading: "4. Возврат средств",
+      items: [
+        "4.1. Пользователь вправе отказаться от подписки и запросить возврат в течение [N] дней с момента оплаты, если функции Premium не использовались.",
+        "4.2. Запрос направляется на [email]. Срок рассмотрения — до [N] рабочих дней.",
+      ],
+    },
+    {
+      heading: "5. Ответственность",
+      items: [
+        "5.1. Исполнитель не несёт ответственности за перерывы в работе Сервиса, вызванные сбоями сторонних источников данных или хостинга.",
+        "5.2. Сервис не связан с Valve Corporation и не является официальным продуктом Dota 2.",
+      ],
+    },
+    {
+      heading: "6. Реквизиты",
+      items: ["[ИП / самозанятый Фамилия Имя Отчество]", "ИНН: [ИНН]", "Email: [email]"],
+    },
+  ],
+};
+
+const LEGAL_PRIVACY = {
+  title: "Обработка персональных данных",
+  date: "[дата]",
+  draft: true,
+  sections: [
+    {
+      heading: "1. Какие данные собираются",
+      items: [
+        "1.1. При входе через Steam: идентификатор Steam и открытые данные профиля — никнейм и аватар.",
+        "1.2. Публичная игровая статистика, связанная с этим идентификатором. Она получается из открытых источников и изначально является общедоступной.",
+        "1.3. При оплате подписки: факт и дата оплаты, срок действия. Данные банковских карт Сервисом не собираются.",
+        "1.4. Настройки интерфейса, пул героев и сохранённые драфты хранятся в браузере и на сервер не передаются.",
+      ],
+    },
+    {
+      heading: "2. Зачем они нужны",
+      items: [
+        "2.1. Для отображения персональной статистики и работы функций Сервиса.",
+        "2.2. Для определения наличия активной подписки.",
+      ],
+    },
+    {
+      heading: "3. Где хранятся",
+      items: [
+        "3.1. Данные о подписках хранятся у поставщика инфраструктуры.",
+        "3.2. Игровая статистика Исполнителем не сохраняется — она запрашивается у источников по мере необходимости.",
+      ],
+    },
+    {
+      heading: "4. Передача третьим лицам",
+      items: [
+        "4.1. Персональные данные не передаются третьим лицам, за исключением платёжного сервиса в объёме, необходимом для проведения платежа.",
+      ],
+    },
+    {
+      heading: "5. Права пользователя",
+      items: [
+        "5.1. Пользователь вправе запросить сведения об обрабатываемых данных, их исправление или удаление, направив запрос на [email].",
+        "5.2. Запрос рассматривается в срок до [N] рабочих дней.",
+      ],
+    },
+  ],
+};
 
 /* ---------- first-visit tour ---------- */
 
@@ -4788,7 +4925,7 @@ const PRO_FEATURES = [
   "Безлимитный пул героев",
 ];
 
-function PricingTab() {
+function PricingTab({ onOpenLegal }) {
   const [premium, setPremium] = usePremium();
   return (
     <div style={styles.body}>
@@ -4829,6 +4966,14 @@ function PricingTab() {
               <span>{f}</span>
             </div>
           ))}
+          {onOpenLegal && (
+            <button
+              style={{ ...styles.footerLink, marginTop: 12, alignSelf: "flex-start" }}
+              onClick={() => onOpenLegal("offer")}
+            >
+              Условия подписки (оферта)
+            </button>
+          )}
           <button
             style={{ ...styles.premiumBtn, marginLeft: 0, marginTop: 14 }}
             onClick={() => setPremium(!premium)}
@@ -4837,6 +4982,432 @@ function PricingTab() {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/* ---------- тренажёр драфта (Captain's Mode) ---------- */
+
+/* Стандартная последовательность CM: 14 банов и 10 пиков, по 7 и 5 на команду.
+   Схема у Valve менялась между патчами — здесь взята общепринятая современная. */
+const CM_SEQUENCE = [
+  ["radiant", "ban"], ["dire", "ban"], ["radiant", "ban"], ["dire", "ban"],
+  ["radiant", "pick"], ["dire", "pick"], ["dire", "pick"], ["radiant", "pick"],
+  ["radiant", "ban"], ["dire", "ban"], ["radiant", "ban"],
+  ["dire", "ban"], ["radiant", "ban"], ["dire", "ban"],
+  ["dire", "pick"], ["radiant", "pick"], ["radiant", "pick"], ["dire", "pick"],
+  ["radiant", "ban"], ["dire", "ban"], ["radiant", "ban"], ["dire", "ban"],
+  ["radiant", "pick"], ["dire", "pick"],
+];
+
+const CM_POOL_SIZE = 60;
+
+function CaptainsModeTab({ heroes }) {
+  const [side, setSide] = useState("radiant");
+  const [hints, setHints] = useState(true);
+  const [started, setStarted] = useState(false);
+  const [step, setStep] = useState(0);
+  const [picks, setPicks] = useState({ radiant: [], dire: [] });
+  const [bans, setBans] = useState([]);
+  const [history, setHistory] = useState([]);
+  const [query, setQuery] = useState("");
+  const [, force] = useState(0);
+
+  // ограничиваем пул популярными героями: иначе нужны матчапы на все 124
+  const pool = useMemo(() => {
+    return [...heroes]
+      .map((h) => ({ hero: h, picks: bracketStats(h, BRACKETS[0]).picks }))
+      .sort((a, b) => b.picks - a.picks)
+      .slice(0, CM_POOL_SIZE)
+      .map((x) => x.hero);
+  }, [heroes]);
+
+  const usedIds = useMemo(
+    () => new Set([...picks.radiant, ...picks.dire, ...bans]),
+    [picks, bans]
+  );
+
+  // подгружаем матчапы для пула, чтобы бот и подсказки могли считать
+  useEffect(() => {
+    if (!started) return;
+    let cancelled = false;
+    (async () => {
+      for (const h of pool.slice(0, 30)) {
+        if (publicMatchupsCache.has(h.id) || matchupsCache.has(h.id)) continue;
+        try {
+          await getPublicMatchups(h.id);
+        } catch {
+          try {
+            await getMatchups(h.id);
+          } catch {
+            // герой останется без данных, оценка по нему будет неизвестна
+          }
+        }
+        if (!cancelled) force((v) => v + 1);
+      }
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [started]);
+
+  function matchupsFor(id) {
+    return publicMatchupsCache.get(id) || matchupsCache.get(id) || null;
+  }
+
+  function pairWinRate(aId, bId) {
+    const a = matchupsFor(aId);
+    if (a) {
+      const e = a.find((m) => m.hero_id === bId);
+      if (e && e.games_played > 0) return e.wins / e.games_played;
+    }
+    const b = matchupsFor(bId);
+    if (b) {
+      const e = b.find((m) => m.hero_id === aId);
+      if (e && e.games_played > 0) return 1 - e.wins / e.games_played;
+    }
+    return null;
+  }
+
+  /* Оценка героя: насколько он хорош против уже собранной команды соперника.
+     Для бана считаем наоборот — насколько герой опасен для нас. */
+  function scoreFor(heroId, forSide, action) {
+    const enemy = forSide === "radiant" ? picks.dire : picks.radiant;
+    const own = forSide === "radiant" ? picks.radiant : picks.dire;
+    const against = action === "pick" ? enemy : own;
+    if (against.length === 0) return null;
+    const rates = against.map((id) => pairWinRate(heroId, id)).filter((v) => v != null);
+    if (rates.length === 0) return null;
+    return rates.reduce((s, v) => s + v, 0) / rates.length;
+  }
+
+  function rankCandidates(forSide, action) {
+    return pool
+      .filter((h) => !usedIds.has(h.id))
+      .map((h) => ({ hero: h, score: scoreFor(h.id, forSide, action) }))
+      .filter((x) => x.score != null)
+      .sort((a, b) => b.score - a.score);
+  }
+
+  const current = started && step < CM_SEQUENCE.length ? CM_SEQUENCE[step] : null;
+  const currentSide = current ? current[0] : null;
+  const currentAction = current ? current[1] : null;
+  const isMyTurn = current && currentSide === side;
+  const finished = started && step >= CM_SEQUENCE.length;
+
+  const suggestions = useMemo(() => {
+    if (!isMyTurn || !hints) return [];
+    return rankCandidates(side, currentAction).slice(0, 5);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMyTurn, hints, step, picks, bans, pool]);
+
+  function applyChoice(heroId, byUser) {
+    const best = rankCandidates(currentSide, currentAction);
+    const chosenScore = scoreFor(heroId, currentSide, currentAction);
+    const bestEntry = best[0] || null;
+
+    setHistory((h) => [
+      ...h,
+      {
+        step,
+        side: currentSide,
+        action: currentAction,
+        heroId,
+        byUser,
+        chosenScore,
+        bestHeroId: bestEntry ? bestEntry.hero.id : null,
+        bestScore: bestEntry ? bestEntry.score : null,
+      },
+    ]);
+
+    if (currentAction === "ban") setBans((b) => [...b, heroId]);
+    else setPicks((p) => ({ ...p, [currentSide]: [...p[currentSide], heroId] }));
+
+    setStep((s) => s + 1);
+    setQuery("");
+  }
+
+  // ход соперника
+  useEffect(() => {
+    if (!started || !current || isMyTurn) return;
+    const timer = setTimeout(() => {
+      const ranked = rankCandidates(currentSide, currentAction);
+      const pickFrom = ranked.length > 0 ? ranked.slice(0, 3) : null;
+      let chosen;
+      if (pickFrom && pickFrom.length) {
+        chosen = pickFrom[Math.floor(Math.random() * pickFrom.length)].hero.id;
+      } else {
+        const free = pool.filter((h) => !usedIds.has(h.id));
+        if (free.length === 0) return;
+        chosen = free[Math.floor(Math.random() * free.length)].id;
+      }
+      applyChoice(chosen, false);
+    }, 700);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [started, step, isMyTurn]);
+
+  function reset() {
+    setStarted(false);
+    setStep(0);
+    setPicks({ radiant: [], dire: [] });
+    setBans([]);
+    setHistory([]);
+    setQuery("");
+  }
+
+  const heroById = (id) => heroes.find((h) => h.id === id);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const free = pool.filter((h) => !usedIds.has(h.id));
+    if (!q) return free;
+    return free.filter((h) => h.localized_name.toLowerCase().includes(q));
+  }, [pool, usedIds, query]);
+
+  if (!started) {
+    return (
+      <div style={styles.body}>
+        <div style={styles.panel}>
+          <div style={styles.panelHeader}>
+            <Swords size={16} color="#C084FC" />
+            <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Тренажёр драфта</span>
+          </div>
+          <p style={styles.legalText}>
+            Полный Captain’s Mode против соперника: 14 банов и 10 пиков по очереди.
+            Соперник выбирает по тем же данным, что и подсказки.
+          </p>
+
+          <div style={styles.cmSetupRow}>
+            <span style={styles.cmSetupLabel}>Сторона</span>
+            <div style={styles.segment}>
+              <button
+                style={{ ...styles.segmentBtn, ...(side === "radiant" ? styles.segmentBtnActive : {}) }}
+                onClick={() => setSide("radiant")}
+              >Radiant</button>
+              <button
+                style={{ ...styles.segmentBtn, ...(side === "dire" ? styles.segmentBtnActive : {}) }}
+                onClick={() => setSide("dire")}
+              >Dire</button>
+            </div>
+          </div>
+
+          <div style={styles.cmSetupRow}>
+            <span style={styles.cmSetupLabel}>Подсказки</span>
+            <div style={styles.segment}>
+              <button
+                style={{ ...styles.segmentBtn, ...(hints ? styles.segmentBtnActive : {}) }}
+                onClick={() => setHints(true)}
+              >С подсказками</button>
+              <button
+                style={{ ...styles.segmentBtn, ...(!hints ? styles.segmentBtnActive : {}) }}
+                onClick={() => setHints(false)}
+              >Без подсказок</button>
+            </div>
+          </div>
+
+          <p style={{ ...styles.mutedText, fontSize: 12 }}>
+            {hints
+              ? "На каждом ходу увидишь, кого стоит взять или забанить и почему."
+              : "Подсказок не будет — разбор ошибок и удачных решений покажем в конце."}
+          </p>
+
+          <button className="btn-lift" style={{ ...styles.homeCta, marginTop: 14 }} onClick={() => setStarted(true)}>
+            Начать драфт <ArrowRight size={16} />
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={styles.body}>
+      <div style={styles.cmHeader}>
+        <div>
+          <div style={styles.cmStepLabel}>
+            {finished ? "Драфт завершён" : `Ход ${step + 1} из ${CM_SEQUENCE.length}`}
+          </div>
+          {!finished && (
+            <div style={{ ...styles.cmTurn, color: isMyTurn ? "#5FCB8E" : "#9C8FB0" }}>
+              {isMyTurn ? "Твой ход" : "Ход соперника"} ·{" "}
+              {currentAction === "ban" ? "бан" : "пик"} ·{" "}
+              {currentSide === "radiant" ? "Radiant" : "Dire"}
+            </div>
+          )}
+        </div>
+        <button style={styles.tourGo} onClick={reset}>Заново</button>
+      </div>
+
+      <div className="two-col" style={styles.twoCol}>
+        <CmTeamPanel title="Radiant" color="#5FCB8E" ids={picks.radiant} heroById={heroById} mine={side === "radiant"} />
+        <CmTeamPanel title="Dire" color="#E2574C" ids={picks.dire} heroById={heroById} mine={side === "dire"} />
+      </div>
+
+      {bans.length > 0 && (
+        <div style={styles.panel}>
+          <div style={styles.panelHeader}>
+            <X size={16} color="#E2574C" />
+            <span style={{ ...styles.panelTitle, color: "#E2574C" }}>Забанены ({bans.length})</span>
+          </div>
+          <div style={styles.cmBanRow}>
+            {bans.map((id) => {
+              const h = heroById(id);
+              return h ? (
+                <div key={id} style={styles.cmBanned} title={h.localized_name}>
+                  <HeroIcon hero={h} style={styles.matchupIcon} />
+                </div>
+              ) : null;
+            })}
+          </div>
+        </div>
+      )}
+
+      {finished && <CmReview history={history} heroById={heroById} side={side} />}
+
+      {!finished && isMyTurn && (
+        <>
+          {hints && suggestions.length > 0 && (
+            <div style={styles.panel}>
+              <div style={styles.panelHeader}>
+                <Sparkles size={16} color="#C084FC" />
+                <span style={{ ...styles.panelTitle, color: "#C084FC" }}>
+                  {currentAction === "ban" ? "Кого стоит забанить" : "Кого стоит взять"}
+                </span>
+              </div>
+              {suggestions.map(({ hero, score }) => (
+                <div key={hero.id} className="role-row" style={styles.roleRow} onClick={() => applyChoice(hero.id, true)}>
+                  <HeroIcon hero={hero} style={styles.matchupIcon} />
+                  <span style={styles.matchupName}>{hero.localized_name}</span>
+                  <span style={styles.rolePct}>{(score * 100).toFixed(0)}%</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={styles.panel}>
+            <div style={styles.searchWrap}>
+              <Search size={14} color="#9C8FB0" />
+              <input
+                style={styles.searchInput}
+                placeholder="Найти героя…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+            </div>
+            <div style={styles.cmGrid}>
+              {filtered.map((h) => (
+                <button key={h.id} style={styles.cmCell} onClick={() => applyChoice(h.id, true)} title={h.localized_name}>
+                  <HeroIcon hero={h} style={styles.cmCellIcon} />
+                  <span style={styles.cmCellName}>{h.localized_name}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function CmTeamPanel({ title, color, ids, heroById, mine }) {
+  return (
+    <div style={{ ...styles.panel, borderTop: `3px solid ${color}` }}>
+      <div style={styles.panelHeader}>
+        <span style={{ ...styles.panelTitle, color }}>{title}</span>
+        {mine && <span style={styles.cmYou}>ты</span>}
+      </div>
+      {Array.from({ length: 5 }).map((_, i) => {
+        const h = ids[i] ? heroById(ids[i]) : null;
+        return (
+          <div key={i} style={styles.slotRow}>
+            <span style={styles.slotPos}>{POSITIONS[i].label}</span>
+            {h ? (
+              <>
+                <HeroIcon hero={h} style={styles.matchupIcon} />
+                <span style={styles.matchupName}>{h.localized_name}</span>
+              </>
+            ) : (
+              <span style={{ ...styles.mutedText, fontSize: 12 }}>—</span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* Разбор строится только на посчитанных данных: сравниваем выбор игрока с лучшим
+   доступным вариантом на том же ходу. Ничего не додумываем. */
+function CmReview({ history, heroById, side }) {
+  const mine = history.filter((h) => h.byUser && h.chosenScore != null && h.bestScore != null);
+  const mistakes = mine
+    .map((h) => ({ ...h, loss: h.bestScore - h.chosenScore }))
+    .filter((h) => h.loss > 0.02)
+    .sort((a, b) => b.loss - a.loss)
+    .slice(0, 4);
+  const good = mine
+    .map((h) => ({ ...h, loss: h.bestScore - h.chosenScore }))
+    .filter((h) => h.loss <= 0.005)
+    .slice(0, 4);
+
+  return (
+    <div style={styles.panel}>
+      <div style={styles.panelHeader}>
+        <BarChart3 size={16} color="#C084FC" />
+        <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Разбор твоего драфта</span>
+      </div>
+
+      {mine.length === 0 && (
+        <div style={styles.emptyState}>
+          Недостаточно данных по выбранным героям, чтобы оценить решения.
+        </div>
+      )}
+
+      {good.length > 0 && (
+        <>
+          <div style={styles.cmReviewHeading}>Удачные решения</div>
+          {good.map((h) => {
+            const hero = heroById(h.heroId);
+            if (!hero) return null;
+            return (
+              <div key={h.step} style={styles.roleRow}>
+                <HeroIcon hero={hero} style={styles.matchupIcon} />
+                <span style={styles.matchupName}>
+                  {h.action === "ban" ? "Бан" : "Пик"} {hero.localized_name}
+                </span>
+                <span style={{ ...styles.rolePct, color: "#5FCB8E" }}>лучший вариант</span>
+              </div>
+            );
+          })}
+        </>
+      )}
+
+      {mistakes.length > 0 && (
+        <>
+          <div style={styles.cmReviewHeading}>Что можно было лучше</div>
+          {mistakes.map((h) => {
+            const hero = heroById(h.heroId);
+            const best = heroById(h.bestHeroId);
+            if (!hero || !best) return null;
+            return (
+              <div key={h.step} style={styles.cmMistake}>
+                <div style={styles.roleRow}>
+                  <HeroIcon hero={hero} style={styles.matchupIcon} />
+                  <span style={styles.matchupName}>
+                    {h.action === "ban" ? "Бан" : "Пик"} {hero.localized_name}
+                  </span>
+                  <span style={{ ...styles.rolePct, color: "#E2574C" }}>
+                    −{Math.round(h.loss * 100)}%
+                  </span>
+                </div>
+                <div style={styles.cmMistakeNote}>
+                  Сильнее был бы {best.localized_name} — {Math.round(h.bestScore * 100)}% против{" "}
+                  {Math.round(h.chosenScore * 100)}%
+                </div>
+              </div>
+            );
+          })}
+        </>
+      )}
     </div>
   );
 }
@@ -5590,6 +6161,37 @@ const styles = {
     fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 13, width: 96,
     textAlign: "right", flexShrink: 0, whiteSpace: "nowrap",
   },
+  cmSetupRow: { display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginTop: 14 },
+  cmSetupLabel: { fontSize: 13, color: "#9C8FB0", width: 90, flexShrink: 0 },
+  cmHeader: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" },
+  cmStepLabel: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 18 },
+  cmTurn: { fontSize: 13, marginTop: 2 },
+  cmYou: {
+    fontSize: 10, color: "#C084FC", border: "1px solid #C084FC", borderRadius: 999,
+    padding: "1px 8px", marginLeft: "auto",
+  },
+  cmBanRow: { display: "flex", gap: 6, flexWrap: "wrap" },
+  cmBanned: { opacity: 0.45, filter: "grayscale(70%)" },
+  cmGrid: {
+    display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(88px, 1fr))",
+    gap: 8, marginTop: 12, maxHeight: 340, overflowY: "auto",
+  },
+  cmCell: {
+    display: "flex", flexDirection: "column", alignItems: "center", gap: 4, padding: 8,
+    background: "#140B22", border: "1px solid #2F1F49", borderRadius: 10, cursor: "pointer",
+    color: "#F2EAFB",
+  },
+  cmCellIcon: { width: 34, height: 34, borderRadius: 6 },
+  cmCellName: {
+    fontSize: 10, textAlign: "center", lineHeight: 1.2, overflow: "hidden",
+    display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical",
+  },
+  cmReviewHeading: {
+    fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 13, color: "#9C8FB0",
+    textTransform: "uppercase", letterSpacing: "0.04em", margin: "14px 0 6px",
+  },
+  cmMistake: { padding: "6px 0", borderBottom: "1px solid #241636" },
+  cmMistakeNote: { fontSize: 12, color: "#C4B8D8", marginLeft: 30, marginTop: 2 },
   reasonRow: { display: "flex", gap: 8, fontSize: 13, color: "#C4B8D8", lineHeight: 1.5, padding: "5px 0" },
   slotRow: { display: "flex", alignItems: "center", gap: 8, padding: "6px 0", minHeight: 32 },
   slotPos: { fontSize: 10, color: "#9C8FB0", width: 62, flexShrink: 0, textTransform: "uppercase", letterSpacing: "0.03em" },
@@ -5652,5 +6254,20 @@ const styles = {
   sideRowIcon: { width: 22, height: 22, borderRadius: 4 },
   sideRowName: { fontSize: 13, flex: 1 },
   sideRowScore: { fontSize: 12, fontWeight: 700, fontFamily: "'Rajdhani', sans-serif" },
-  footer: { marginTop: 24, fontSize: 11, color: "#9C8FB0", textAlign: "center" },
+  footer: { marginTop: 32, paddingTop: 20, borderTop: "1px solid #1D1230", fontSize: 11, color: "#9C8FB0", textAlign: "center" },
+  footerLinks: { display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap", alignItems: "center" },
+  footerLink: {
+    background: "transparent", border: "none", color: "#C4B8D8", fontSize: 12,
+    cursor: "pointer", padding: 0, textDecoration: "underline", textUnderlineOffset: 3,
+  },
+  footerSep: { color: "#9C8FB0" },
+  legalTitle: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 24, margin: "0 0 4px" },
+  legalMeta: { fontSize: 12, color: "#9C8FB0", marginBottom: 16 },
+  legalDraftNote: {
+    background: "#1A1508", border: "1px solid #4A3D1E", borderRadius: 10, padding: 12,
+    fontSize: 12, color: "#C4B8D8", marginBottom: 18, lineHeight: 1.5,
+  },
+  legalSection: { marginBottom: 18 },
+  legalHeading: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 15, color: "#C084FC", marginBottom: 6 },
+  legalText: { fontSize: 13, color: "#C4B8D8", lineHeight: 1.6, margin: "0 0 8px" },
 };
