@@ -734,8 +734,10 @@ async function fetchPlayerBundle(accountId, rankedOnly = true) {
   const cached = readLocalCache(cacheKey, PLAYER_TTL_MS);
   if (cached) return cached;
 
-  const lobby = rankedOnly ? "?lobby_type=7" : "";
-  const lobbyAmp = rankedOnly ? "&lobby_type=7" : "";
+  /* У OpenDota по умолчанию включён фильтр significant=1: он отбрасывает турбо и
+     нестандартные режимы. Чтобы «Все матчи» действительно означало все, его надо снять. */
+  const lobby = rankedOnly ? "?lobby_type=7" : "?significant=0";
+  const lobbyAmp = rankedOnly ? "&lobby_type=7" : "&significant=0";
 
   const [profileRes, wlRes, heroesRes, matchesRes, peersRes] = await Promise.all([
     fetch(`https://api.opendota.com/api/players/${accountId}`),
@@ -1823,6 +1825,10 @@ function ProfileTab({ heroes, steamIdFromUrl, onOpenCard }) {
                   {data.wl.win + data.wl.lose > 0
                     ? `${data.wl.win} побед / ${data.wl.lose} поражений (${((data.wl.win / (data.wl.win + data.wl.lose)) * 100).toFixed(1)}%)`
                     : "Нет данных о матчах"}
+                </div>
+                <div style={{ ...styles.mutedText, fontSize: 11, marginTop: 2 }}>
+                  Всего {data.wl.win + data.wl.lose} матчей по данным OpenDota
+                  {rankedOnly ? " (только рейтинг)" : " (все режимы)"}
                 </div>
               </div>
 
