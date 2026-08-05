@@ -986,7 +986,7 @@ function App() {
   const selected = selectedId ? heroById(selectedId) : null;
 
   return (
-    <div style={styles.page}>
+    <div className="page" style={styles.page}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@1,600;1,700;1,900&family=Rajdhani:wght@500;600;700&family=Inter:wght@400;500;600&display=swap');
         * { box-sizing: border-box; }
@@ -1087,6 +1087,13 @@ function App() {
         .home-text-col { text-align: left; }
         .rank-scroll { overflow-x: auto; scrollbar-width: none; }
         .rank-scroll::-webkit-scrollbar { display: none; }
+        @media (max-width: 480px) {
+          .page { padding: 12px !important; }
+          .stats-grid { grid-template-columns: 1fr 1fr !important; }
+          .checkpoint-row { grid-template-columns: 1fr !important; }
+          .fight-summary { gap: 6px !important; }
+          .menu-dropdown { max-height: 70vh; overflow-y: auto; }
+        }
         @media (max-width: 860px) {
           .layout-cols { grid-template-columns: 1fr !important; }
           .hero-list { max-height: 210px !important; }
@@ -1353,6 +1360,15 @@ function TourOverlay({ onClose, onGo }) {
 
 /* ---------- page navigation dropdown ---------- */
 
+/* Тринадцать пунктов подряд читать тяжело — раскладываем по смыслу. */
+const MENU_GROUPS = [
+  { title: "Начало", keys: ["home"] },
+  { title: "Герои", keys: ["card", "table", "web", "roles", "compare"] },
+  { title: "Драфт", keys: ["draft", "captains"] },
+  { title: "Матчи", keys: ["matches", "profile"] },
+  { title: "Справка", keys: ["reference", "patches", "pricing"] },
+];
+
 function PageMenu({ tab, setTab }) {
   const [open, setOpen] = useState(false);
   const current = TABS.find((t) => t.key === tab) || TABS[0];
@@ -1369,21 +1385,28 @@ function PageMenu({ tab, setTab }) {
       {open && (
         <>
           <div style={styles.menuBackdrop} onClick={() => setOpen(false)} />
-          <div style={styles.menuDropdown}>
-            {TABS.map((t) => {
-              const Icon = t.icon;
-              const active = t.key === tab;
-              return (
-                <button
-                  key={t.key}
-                  style={{ ...styles.menuItem, ...(active ? styles.menuItemActive : {}) }}
-                  onClick={() => { setTab(t.key); setOpen(false); }}
-                >
-                  <Icon size={16} />
-                  {t.label}
-                </button>
-              );
-            })}
+          <div className="menu-dropdown" style={styles.menuDropdown}>
+            {MENU_GROUPS.map((group) => (
+              <div key={group.title}>
+                <div style={styles.menuGroupTitle}>{group.title}</div>
+                {group.keys.map((key) => {
+                  const t = TABS.find((x) => x.key === key);
+                  if (!t) return null;
+                  const Icon = t.icon;
+                  const active = t.key === tab;
+                  return (
+                    <button
+                      key={t.key}
+                      style={{ ...styles.menuItem, ...(active ? styles.menuItemActive : {}) }}
+                      onClick={() => { setTab(t.key); setOpen(false); }}
+                    >
+                      <Icon size={16} />
+                      {t.label}
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
           </div>
         </>
       )}
@@ -2351,7 +2374,7 @@ function ProfileCharts({ matches, wl, heroes, onOpenCard, theme = DEFAULT_RANK_T
             <Gem size={16} color={theme.color} />
             <span style={{ ...styles.panelTitle, color: theme.color }}>Средние показатели</span>
           </div>
-          <div style={styles.statsGrid}>
+          <div className="stats-grid" style={styles.statsGrid}>
             <Stat label="KDA" value={stats.kda} />
             <Stat label="Убийства" value={stats.avgKills} />
             <Stat label="Смерти" value={stats.avgDeaths} />
@@ -2637,7 +2660,7 @@ function HeroCardTab({ heroes, selected, selectedId, setSelectedId }) {
             ))}
           </div>
 
-          <div style={styles.statsGrid}>
+          <div className="stats-grid" style={styles.statsGrid}>
             <Stat label="Винрейт" value={cardWinRate ? `${cardWinRate.toFixed(1)}%` : "нет данных"} />
             <Stat label="Матчей" value={bStats.picks ? bStats.picks.toLocaleString("ru-RU") : "—"} />
             <Stat label="Баны в про" value={selected.pro_ban ?? "—"} />
@@ -5834,7 +5857,7 @@ async function requestMatchParse(matchId) {
   return r.json();
 }
 
-function ParseRequestBlock({ matchId }) {
+function ParseRequestBlock({ matchId, startTime }) {
   const storageKey = `dw_parse_req_${matchId}`;
 
   // запрос запоминаем: иначе после перезагрузки кнопка снова активна и кажется, что ничего не произошло
@@ -5874,10 +5897,28 @@ function ParseRequestBlock({ matchId }) {
     window.location.reload();
   }
 
+  /* Valve удаляет реплеи примерно через две недели — для старых матчей разбор
+     невозможен в принципе, и предлагать его бессмысленно. */
+  const REPLAY_LIFETIME_DAYS = 14;
+  const ageDays = startTime ? (Date.now() / 1000 - startTime) / 86400 : null;
+  const replayGone = ageDays != null && ageDays > REPLAY_LIFETIME_DAYS;
+
+  if (replayGone) {
+    return (
+      <div style={styles.parseBlock}>
+        <div style={{ ...styles.mutedText, fontSize: 12 }}>
+          Подробных данных по этому матчу нет и уже не будет: Valve хранит реплеи около
+          двух недель, а этому матчу {Math.round(ageDays)} дн. Доступны только счёт,
+          герои и итоги игроков.
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={styles.parseBlock}>
       <div style={{ ...styles.mutedText, fontSize: 12 }}>
-        Реплей этого матча не разобран, поэтому нет драк, полученного урона и кривой
+        Реплей этого матча ещё не разобран, поэтому нет драк, полученного урона и кривой
         преимущества. Разбор можно запросить — он занимает несколько минут.
       </div>
       {state.status === "idle" && (
@@ -6003,7 +6044,7 @@ function MatchDetail({ matchId, heroes, accountId, onClose, onOpenCard }) {
                 <History size={16} color="#C084FC" />
                 <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Ключевые минуты</span>
               </div>
-              <div style={styles.checkpointRow}>
+              <div className="checkpoint-row" style={styles.checkpointRow}>
                 {checkpoints.map((cp) => {
                   const leadRadiant = cp.gold >= 0;
                   const color = Math.abs(cp.gold) < 500 ? "#C084FC" : leadRadiant ? "#5FCB8E" : "#E2574C";
@@ -6070,7 +6111,7 @@ function MatchDetail({ matchId, heroes, accountId, onClose, onOpenCard }) {
 
           <PersonalReview match={m} accountId={accountId} heroById={heroById} itemCatalog={itemCatalog} />
 
-          {!Array.isArray(m.radiant_gold_adv) && <ParseRequestBlock matchId={matchId} />}
+          {!Array.isArray(m.radiant_gold_adv) && <ParseRequestBlock matchId={matchId} startTime={m.start_time} />}
 
           <TeamfightsPanel match={m} heroById={heroById} />
 
@@ -6226,7 +6267,7 @@ function TeamfightsPanel({ match, heroById }) {
         })}
       </div>
 
-      <div style={styles.fightSummary}>
+      <div className="fight-summary" style={styles.fightSummary}>
         <div>
           <div style={styles.fightStat}>{active.deaths}</div>
           <div style={styles.fightStatLabel}>смертей</div>
@@ -7545,7 +7586,6 @@ const styles = {
   savedVs: { fontSize: 10, color: "#9C8FB0", margin: "0 4px" },
 
   /* patches (legacy row, kept for spacing) */
-  patchRow: { display: "flex", alignItems: "center", gap: 10, padding: "9px 0", borderBottom: "1px solid #241636" },
   patchDot: { width: 8, height: 8, borderRadius: "50%", flexShrink: 0 },
   patchName: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 14 },
   patchCurrent: {
@@ -7607,6 +7647,10 @@ const styles = {
     background: "#150C24", border: "1px solid #2F1F49", borderRadius: 12, padding: 6,
     boxShadow: "0 20px 50px rgba(0,0,0,0.55)", display: "flex", flexDirection: "column", gap: 2,
   },
+  menuGroupTitle: {
+    fontSize: 10, color: "#9C8FB0", textTransform: "uppercase", letterSpacing: "0.06em",
+    padding: "10px 12px 4px", fontFamily: "'Rajdhani', sans-serif", fontWeight: 700,
+  },
   menuItem: {
     display: "flex", alignItems: "center", gap: 10, background: "transparent", border: "none",
     color: "#9C8FB0", fontSize: 13, padding: "10px 12px", borderRadius: 8, cursor: "pointer", textAlign: "left",
@@ -7633,10 +7677,6 @@ const styles = {
   hexVisual: {
     width: "clamp(220px, 26vw, 320px)", height: "auto",
     filter: "drop-shadow(0 0 25px rgba(178,75,243,0.35))",
-  },
-  homePortrait: {
-    width: 260, height: "auto", maxHeight: 380, objectFit: "contain",
-    filter: "drop-shadow(0 0 45px rgba(178,75,243,0.5))",
   },
   homeTextCol: { position: "relative", zIndex: 1, flex: 1, minWidth: 0 },
   homeTitle: {
@@ -7676,19 +7716,6 @@ const styles = {
     background: "transparent", border: "1px solid #3A2857", color: "#C4B8D8",
     fontSize: 13, padding: "11px 18px", borderRadius: 999, cursor: "pointer",
   },
-  homeCard: {
-    position: "relative", display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 10, textAlign: "left",
-    background: "linear-gradient(160deg, #170D28, #120A1E)", border: "1px solid #2F1F49", borderRadius: 14, padding: 20,
-    cursor: "pointer", overflow: "hidden",
-    boxShadow: "0 0 30px rgba(109,40,217,0.1)",
-  },
-  homeCardIconBadge: {
-    display: "flex", alignItems: "center", justifyContent: "center", width: 40, height: 40, borderRadius: 10,
-    background: "linear-gradient(135deg, rgba(178,75,243,0.18), rgba(109,40,217,0.08))",
-    border: "1px solid #3A2857",
-  },
-  homeCardTitle: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 16, color: "#F2EAFB" },
-  homeCardDesc: { fontSize: 12, color: "#9C8FB0", lineHeight: 1.4 },
 
   layout: { display: "grid", gridTemplateColumns: "260px minmax(0, 1fr)", gap: 20, alignItems: "start" },
   sidebar: { background: "#0E081A", border: "1px solid #2A1A40", borderRadius: 10, padding: 8, display: "flex", flexDirection: "column", gap: 8 },
@@ -7799,7 +7826,6 @@ const styles = {
     textTransform: "uppercase", letterSpacing: "0.04em", cursor: "pointer", display: "flex", alignItems: "center",
     justifyContent: "flex-end", gap: 4,
   },
-  colType: { width: 100, textAlign: "right" },
   row: { display: "flex", alignItems: "center", gap: 10, padding: "9px 14px", borderBottom: "1px solid #241636" },
   enemyCell: { flex: "1 1 140px", display: "flex", alignItems: "center", gap: 10, minWidth: 100 },
   enemyIcon: { width: 24, height: 24, borderRadius: 4, flexShrink: 0 },
@@ -7812,7 +7838,6 @@ const styles = {
     padding: "26px 14px", textAlign: "center", color: "#9C8FB0", fontSize: 13,
     border: "1px dashed #2A1A40", borderRadius: 10, margin: "4px 0",
   },
-  methodNote: { display: "flex", gap: 8, fontSize: 12, color: "#9C8FB0", background: "#0E081A", border: "1px solid #2A1A40", borderRadius: 8, padding: 12 },
   patchBadge: { display: "flex", alignItems: "center", gap: 8, fontSize: 12 },
   profileForm: { display: "flex", gap: 10, flexWrap: "wrap" },
   profileInput: {
@@ -7954,9 +7979,6 @@ const styles = {
   verdictHead: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" },
   verdictLabel: {
     fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 22, letterSpacing: "0.02em",
-  },
-  verdictApprox: {
-    fontSize: 10, color: "#9C8FB0", border: "1px solid #3A2857", borderRadius: 999, padding: "1px 8px",
   },
   verdictReason: { fontSize: 13, color: "#C4B8D8", marginTop: 4, lineHeight: 1.5 },
   personalTop: { display: "flex", gap: 14, alignItems: "center", marginBottom: 14 },
