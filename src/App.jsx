@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import {
-  BarChart, Bar, LineChart, Line, PieChart, Pie, Cell,
+  BarChart, Bar, LineChart, Line, ComposedChart, Area, PieChart, Pie, Cell,
   XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid,
 } from "recharts";
 import {
@@ -469,6 +469,26 @@ function ruDesc(ru, key, isItem) {
   if (!ru) return null;
   if (isItem) return ru.itemDescriptions?.[key] || null;
   return ru.abilities?.[`d:${key}`] || null;
+}
+
+let abilityIdsPromise = null;
+
+async function getAbilityIds() {
+  if (abilityIdsPromise) return abilityIdsPromise;
+  const cached = readLocalCache("dw_ability_ids");
+  if (cached) {
+    abilityIdsPromise = Promise.resolve(cached);
+    return cached;
+  }
+  abilityIdsPromise = (async () => {
+    const r = await fetch("https://unpkg.com/dotaconstants@latest/build/ability_ids.json");
+    if (!r.ok) throw new Error("network");
+    const data = await r.json(); // { "5001": "antimage_mana_break", ... }
+    writeLocalCache("dw_ability_ids", data);
+    return data;
+  })();
+  abilityIdsPromise.catch(() => { abilityIdsPromise = null; });
+  return abilityIdsPromise;
 }
 
 let abilitiesCatalogPromise = null;
@@ -5532,53 +5552,59 @@ function classifyMatch(detail) {
     });
   }
 
-  const behindGold = goldDeficit < -5000;
-  const behindXp = xpCurve ? xpDeficit < -5000 : false;
-  const behindTowers = towersLostByWinner - towersLostByLoser >= 3;
-  const behindCount = [behindGold, behindXp, behindTowers].filter(Boolean).length;
+  /* Камбек — это не только глубина ямы, но и то, как долго в ней сидели.
+     Отставание в 3к, которое держалось полматча, ощущается как камбек сильнее,
+     чем разовый провал на 6к в начале. */
+  const behindMinutes = goldCurve.filter((v) => v < 0).length;
+  const behindShare = behindMinutes / goldCurve.length;
+  const lastBehindIndex = goldCurve.reduce((acc, v, i) => (v < 0 ? i : acc), -1);
 
-  const aheadAllGame = goldCurve.every((v, i) => i < 3 || v > 0);
-  const dominatedTowers = towersLostByLoser - towersLostByWinner >= 5;
+  const deepDeficit = goldDeficit < -6000;
+  const longBehind = behindShare >= 0.2 && goldDeficit < -2000;
+  const xpBehind = xpCurve ? xpDeficit < -4000 : false;
+  const towerBehind = towersLostByWinner - towersLostByLoser >= 3;
 
   const fmtK = (v) => `${(Math.abs(v) / 1000).toFixed(1)}к`;
 
-  if (behindCount >= 2) {
+  if (deepDeficit || longBehind || (xpBehind && behindShare >= 0.15)) {
     const parts = [];
-    if (behindGold) parts.push(`уступал ${fmtK(goldDeficit)} золота`);
-    if (behindXp) parts.push(`${fmtK(xpDeficit)} опыта`);
-    if (behindTowers) parts.push(`потерял на ${towersLostByWinner - towersLostByLoser} башни больше`);
+    if (goldDeficit < -500) parts.push(`уступал до ${fmtK(goldDeficit)} золота`);
+    if (xpBehind) parts.push(`${fmtK(xpDeficit)} опыта`);
+    if (towerBehind) parts.push(`потерял на ${towersLostByWinner - towersLostByLoser} башни больше`);
+    const untilMin = lastBehindIndex > 0 ? `, отыгрался к ${lastBehindIndex}-й минуте` : "";
     return {
       key: "comeback",
       label: "Камбек",
       color: "#E5B33D",
-      reason: `Победитель ${parts.join(", ")} — и всё равно выиграл`,
+      reason: `Победитель ${parts.join(", ")}${untilMin}`,
+      behindShare,
     };
   }
 
-  if (aheadAllGame && finalGold > 20000 && (dominatedTowers || towersLostByWinner <= 2)) {
+  const neverBehind = behindShare < 0.06;
+  if (neverBehind && finalGold > 15000) {
     return {
       key: "stomp",
       label: "Всухую",
       color: "#5FCB8E",
-      reason: `Вёл всю игру, к концу ${fmtK(finalGold)} золота перевеса`,
+      reason: `Вёл почти всю игру, к концу ${fmtK(finalGold)} золота перевеса`,
     };
   }
 
-  const swingSmall = Math.abs(goldDeficit) < 6000 && finalGold < 15000;
   const leadChanges = goldCurve.reduce((acc, v, i) => {
     if (i === 0) return acc;
     const prev = goldCurve[i - 1];
     return acc + ((prev < 0 && v > 0) || (prev > 0 && v < 0) ? 1 : 0);
   }, 0);
 
-  if (leadChanges >= 4 || swingSmall) {
+  if (leadChanges >= 3 || (Math.abs(goldDeficit) < 3000 && finalGold < 12000)) {
     return {
       key: "close",
       label: "Равная игра",
       color: "#C084FC",
-      reason: leadChanges >= 4
+      reason: leadChanges >= 3
         ? `Преимущество переходило ${leadChanges} раз`
-        : "Разрыв по золоту и опыту почти не менялся",
+        : "Разрыв по золоту почти не менялся",
     };
   }
 
@@ -6072,9 +6098,36 @@ function MatchDetail({ matchId, heroes, accountId, onClose, onOpenCard }) {
                 <BarChart3 size={16} color="#C084FC" />
                 <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Преимущество Radiant по минутам</span>
               </div>
+              {(() => {
+                const last = advantage[advantage.length - 1] || {};
+                const g = last.gold || 0;
+                const x = last.xp || 0;
+                return (
+                  <div style={styles.advSummary}>
+                    <span style={{ ...styles.advChip, color: "#E5B33D", borderColor: "#4A3D1E" }}>
+                      {g >= 0 ? "+" : "−"}{Math.abs(Math.round(g / 100) / 10)}к золота
+                    </span>
+                    <span style={{ ...styles.advChip, color: "#C084FC", borderColor: "#3A2857" }}>
+                      {x >= 0 ? "+" : "−"}{Math.abs(Math.round(x / 100) / 10)}к опыта
+                    </span>
+                    <span style={{ ...styles.mutedText, fontSize: 11 }}>
+                      {g >= 0 ? "в пользу Radiant" : "в пользу Dire"}
+                    </span>
+                  </div>
+                );
+              })()}
+
               <div style={{ width: "100%", height: 220 }}>
                 <ResponsiveContainer>
-                  <LineChart data={advantage} margin={{ top: 8, right: 8, left: -10, bottom: 0 }}>
+                  <ComposedChart data={advantage} margin={{ top: 8, right: 8, left: -10, bottom: 0 }}>
+                    <defs>
+                      <linearGradient id="advGold" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#5FCB8E" stopOpacity="0.35" />
+                        <stop offset="50%" stopColor="#5FCB8E" stopOpacity="0.02" />
+                        <stop offset="50%" stopColor="#E2574C" stopOpacity="0.02" />
+                        <stop offset="100%" stopColor="#E2574C" stopOpacity="0.35" />
+                      </linearGradient>
+                    </defs>
                     <CartesianGrid strokeDasharray="3 3" stroke="#2A1A40" vertical={false} />
                     <XAxis dataKey="minute" tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={{ stroke: "#2A1A40" }} tickLine={false} />
                     <YAxis tick={{ fill: "#9C8FB0", fontSize: 11 }} axisLine={false} tickLine={false} />
@@ -6085,13 +6138,13 @@ function MatchDetail({ matchId, heroes, accountId, onClose, onOpenCard }) {
                       labelFormatter={(v) => `${v} минута`}
                       formatter={(v, n) => [v > 0 ? `+${v}` : v, n === "gold" ? "Золото" : "Опыт"]}
                     />
-                    <Line type="monotone" dataKey="gold" stroke="#E5B33D" strokeWidth={2} dot={false} />
-                    <Line type="monotone" dataKey="xp" stroke="#C084FC" strokeWidth={2} dot={false} />
-                  </LineChart>
+                    <Area type="monotone" dataKey="gold" stroke="#E5B33D" strokeWidth={2} fill="url(#advGold)" dot={false} />
+                    <Line type="monotone" dataKey="xp" stroke="#C084FC" strokeWidth={1.5} dot={false} strokeDasharray="4 3" />
+                  </ComposedChart>
                 </ResponsiveContainer>
               </div>
               <div style={{ ...styles.mutedText, fontSize: 11, marginTop: 6 }}>
-                Выше нуля — впереди Radiant, ниже — Dire. Жёлтая линия золото, фиолетовая опыт.
+                Выше нуля — впереди Radiant, ниже — Dire. Сплошная линия золото, пунктир опыт.
               </div>
             </div>
           )}
@@ -6112,6 +6165,10 @@ function MatchDetail({ matchId, heroes, accountId, onClose, onOpenCard }) {
           <PersonalReview match={m} accountId={accountId} heroById={heroById} itemCatalog={itemCatalog} />
 
           {!Array.isArray(m.radiant_gold_adv) && <ParseRequestBlock matchId={matchId} startTime={m.start_time} />}
+
+          <LaneOutcomes match={m} heroById={heroById} />
+
+          <KillMatrix match={m} heroById={heroById} />
 
           <TeamfightsPanel match={m} heroById={heroById} />
 
@@ -6456,6 +6513,7 @@ function PersonalReview({ match, accountId, heroById, itemCatalog }) {
         </>
       )}
 
+      <SkillBuild player={me} heroById={heroById} />
       <PurchaseTimeline player={me} catalog={itemCatalog} />
     </div>
   );
@@ -6500,6 +6558,245 @@ function PurchaseTimeline({ player, catalog }) {
               onError={(e) => { e.currentTarget.style.visibility = "hidden"; }}
             />
             <span style={styles.timelineMin}>{it.minute}′</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* Итоги линий: сравниваем золото команд на 10-й минуте внутри каждой линии.
+   Данные поминутные, поэтому доступны только у разобранных матчей. */
+const LANE_TITLES = { 1: "Нижняя линия", 2: "Центральная линия", 3: "Верхняя линия" };
+
+function LaneOutcomes({ match, heroById }) {
+  const lanes = useMemo(() => {
+    const players = (match && match.players) || [];
+    if (players.length === 0) return [];
+
+    const byLane = {};
+    players.forEach((p) => {
+      const lane = p.lane_role;
+      if (!lane || lane === 4) return; // джунгли не сравниваем
+      if (!byLane[lane]) byLane[lane] = { radiant: [], dire: [] };
+      const side = p.player_slot < 128 ? "radiant" : "dire";
+      byLane[lane][side].push(p);
+    });
+
+    return Object.entries(byLane)
+      .map(([lane, sides]) => {
+        function goldAt10(list) {
+          let sum = 0;
+          let known = false;
+          list.forEach((p) => {
+            const t = p.gold_t;
+            if (Array.isArray(t) && t.length > 10) {
+              sum += t[10];
+              known = true;
+            }
+          });
+          return known ? sum : null;
+        }
+        const r = goldAt10(sides.radiant);
+        const d = goldAt10(sides.dire);
+        if (r == null || d == null || sides.radiant.length === 0 || sides.dire.length === 0) return null;
+        const diff = r - d;
+        return {
+          lane: Number(lane),
+          title: LANE_TITLES[lane] || `Линия ${lane}`,
+          radiant: sides.radiant,
+          dire: sides.dire,
+          diff,
+        };
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.lane - b.lane);
+  }, [match]);
+
+  if (lanes.length === 0) return null;
+
+  return (
+    <div style={styles.panel}>
+      <div style={styles.panelHeader}>
+        <Swords size={16} color="#C084FC" />
+        <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Итоги линий на 10-й минуте</span>
+      </div>
+
+      {lanes.map((l) => {
+        const draw = Math.abs(l.diff) < 500;
+        const radiantWon = l.diff > 0;
+        const color = draw ? "#C084FC" : radiantWon ? "#5FCB8E" : "#E2574C";
+        return (
+          <div key={l.lane} style={styles.laneRow}>
+            <div style={styles.laneHeroes}>
+              {l.radiant.map((p) => (
+                <HeroIcon key={`r${p.player_slot}`} hero={heroById(p.hero_id)} style={styles.laneIcon} />
+              ))}
+              <span style={styles.laneVs}>против</span>
+              {l.dire.map((p) => (
+                <HeroIcon key={`d${p.player_slot}`} hero={heroById(p.hero_id)} style={styles.laneIcon} />
+              ))}
+            </div>
+            <div style={{ ...styles.laneVerdict, color }}>
+              {draw ? "Ровная линия" : `Победа ${radiantWon ? "Radiant" : "Dire"}`}
+              <span style={styles.laneDiff}>
+                {draw ? "" : `+${Math.abs(Math.round(l.diff / 100) / 10)}к золота`}
+              </span>
+            </div>
+            <div style={styles.laneTitle}>{l.title}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* Матрица убийств: OpenDota хранит у каждого игрока поле killed — сколько раз
+   он убил каждого героя. Строим сетку «кто кого». */
+function KillMatrix({ match, heroById }) {
+  const data = useMemo(() => {
+    const players = (match && match.players) || [];
+    const radiant = players.filter((p) => p.player_slot < 128);
+    const dire = players.filter((p) => p.player_slot >= 128);
+    if (radiant.length === 0 || dire.length === 0) return null;
+
+    const hasKills = players.some((p) => p.killed && Object.keys(p.killed).length > 0);
+    if (!hasKills) return null;
+
+    function rowFor(killer, victims) {
+      return victims.map((v) => {
+        const hero = heroById(v.hero_id);
+        const key = hero ? hero.name : null;
+        const n = key && killer.killed ? killer.killed[key] || 0 : 0;
+        return { hero, count: n };
+      });
+    }
+
+    return {
+      radiant: radiant.map((p) => ({ player: p, hero: heroById(p.hero_id), cells: rowFor(p, dire) })),
+      dire: dire.map((p) => ({ player: p, hero: heroById(p.hero_id), cells: rowFor(p, radiant) })),
+      radiantHeroes: radiant.map((p) => heroById(p.hero_id)),
+      direHeroes: dire.map((p) => heroById(p.hero_id)),
+    };
+  }, [match, heroById]);
+
+  const [side, setSide] = useState("radiant");
+
+  if (!data) return null;
+
+  const rows = side === "radiant" ? data.radiant : data.dire;
+  const columns = side === "radiant" ? data.direHeroes : data.radiantHeroes;
+
+  return (
+    <div style={styles.panel}>
+      <div style={styles.panelHeader}>
+        <Swords size={16} color="#C084FC" />
+        <span style={{ ...styles.panelTitle, color: "#C084FC" }}>Разбор убийств</span>
+      </div>
+
+      <div style={styles.segment}>
+        <button
+          style={{ ...styles.segmentBtn, ...(side === "radiant" ? styles.segmentBtnActive : {}) }}
+          onClick={() => setSide("radiant")}
+        >
+          Убийства Radiant
+        </button>
+        <button
+          style={{ ...styles.segmentBtn, ...(side === "dire" ? styles.segmentBtnActive : {}) }}
+          onClick={() => setSide("dire")}
+        >
+          Убийства Dire
+        </button>
+      </div>
+
+      <div style={styles.killScroll}>
+        <table style={styles.killTable}>
+          <thead>
+            <tr>
+              <th style={styles.killCorner} />
+              {columns.map((h, i) => (
+                <th key={i} style={styles.killHeadCell}>
+                  <HeroIcon hero={h} style={styles.killIcon} />
+                </th>
+              ))}
+              <th style={styles.killHeadCell}><span style={styles.killTotalLabel}>всего</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r, ri) => {
+              const total = r.cells.reduce((s, x) => s + x.count, 0);
+              return (
+                <tr key={ri}>
+                  <td style={styles.killRowHead}>
+                    <HeroIcon hero={r.hero} style={styles.killIcon} />
+                  </td>
+                  {r.cells.map((cell, ci) => (
+                    <td key={ci} style={styles.killCell}>
+                      <span style={{ ...styles.killValue, opacity: cell.count ? 1 : 0.25 }}>
+                        {cell.count}
+                      </span>
+                    </td>
+                  ))}
+                  <td style={styles.killCell}>
+                    <span style={{ ...styles.killValue, color: "#C084FC" }}>{total}</span>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+/* Порядок прокачки: у разобранных матчей есть последовательность выбранных
+   способностей. Показываем её для игрока, чей матч смотрим. */
+function SkillBuild({ player, heroById }) {
+  const [maps, setMaps] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([getAbilityIds(), getAbilitiesCatalog()])
+      .then(([ids, cat]) => { if (!cancelled) setMaps({ ids, abilities: cat.abilities }); })
+      .catch(() => { /* без каталога блок не показываем */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  const steps = useMemo(() => {
+    const arr = player && player.ability_upgrades_arr;
+    if (!Array.isArray(arr) || !maps) return [];
+    return arr.map((id, i) => {
+      const key = maps.ids[String(id)];
+      const data = key ? maps.abilities[key] : null;
+      return {
+        level: i + 1,
+        key,
+        name: data && data.dname ? data.dname : key || "?",
+        img: data && data.img ? data.img : null,
+      };
+    });
+  }, [player, maps]);
+
+  if (steps.length === 0) return null;
+
+  return (
+    <div style={styles.timelineWrap}>
+      <div style={styles.timelineTitle}>Порядок прокачки</div>
+      <div style={styles.timelineRow}>
+        {steps.map((s) => (
+          <div key={s.level} style={styles.timelineItem} title={`${s.level} уровень — ${s.name}`}>
+            {s.img ? (
+              <img
+                src={img(s.img)}
+                alt={s.name}
+                style={styles.skillIcon}
+                onError={(e) => { e.currentTarget.style.visibility = "hidden"; }}
+              />
+            ) : (
+              <div style={{ ...styles.skillIcon, background: "#2A1A40" }} />
+            )}
+            <span style={styles.timelineMin}>{s.level}</span>
           </div>
         ))}
       </div>
@@ -7959,6 +8256,15 @@ const styles = {
     borderRadius: 999, padding: "1px 8px", marginTop: 4,
     fontFamily: "'Rajdhani', sans-serif", letterSpacing: "0.03em",
   },
+  laneRow: { padding: "12px 0", borderBottom: "1px solid #241636", textAlign: "center" },
+  laneHeroes: { display: "flex", alignItems: "center", justifyContent: "center", gap: 5, flexWrap: "wrap" },
+  laneIcon: { width: 30, height: 30, borderRadius: 6 },
+  laneVs: { fontSize: 11, color: "#9C8FB0", margin: "0 6px" },
+  laneVerdict: {
+    fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 14, marginTop: 6,
+  },
+  laneDiff: { fontSize: 12, color: "#9C8FB0", marginLeft: 8, fontWeight: 500 },
+  laneTitle: { fontSize: 11, color: "#9C8FB0", marginTop: 2 },
   fightTabs: { display: "flex", gap: 6, overflowX: "auto", paddingBottom: 4, marginBottom: 12 },
   fightTab: {
     flexShrink: 0, background: "transparent", border: "1px solid", borderRadius: 999,
@@ -7994,6 +8300,19 @@ const styles = {
     fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 13,
     width: 42, textAlign: "right", flexShrink: 0,
   },
+  killScroll: { overflowX: "auto", marginTop: 12 },
+  killTable: { borderCollapse: "separate", borderSpacing: 4, minWidth: "100%" },
+  killCorner: { width: 38 },
+  killHeadCell: { padding: 0, textAlign: "center" },
+  killRowHead: { padding: 0 },
+  killIcon: { width: 30, height: 30, borderRadius: 6, display: "block" },
+  killCell: {
+    background: "#0E081A", border: "1px solid #241636", borderRadius: 6,
+    padding: "6px 10px", textAlign: "center", minWidth: 38,
+  },
+  killValue: { fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 14, color: "#F2EAFB" },
+  killTotalLabel: { fontSize: 10, color: "#9C8FB0" },
+  skillIcon: { width: 30, height: 30, borderRadius: 5, border: "1px solid #2F1F49", background: "#0E081A" },
   timelineWrap: { marginTop: 14, paddingTop: 14, borderTop: "1px solid #241636" },
   timelineTitle: {
     fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 13, color: "#9C8FB0",
@@ -8018,6 +8337,11 @@ const styles = {
   matchItemIcon: {
     width: 30, height: 22, borderRadius: 3, objectFit: "cover",
     border: "1px solid #2F1F49", background: "#0E081A",
+  },
+  advSummary: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 },
+  advChip: {
+    fontFamily: "'Rajdhani', sans-serif", fontWeight: 700, fontSize: 13,
+    border: "1px solid", borderRadius: 8, padding: "4px 10px",
   },
   checkpointRow: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))", gap: 10 },
   checkpointCard: {
