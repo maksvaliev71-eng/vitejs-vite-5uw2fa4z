@@ -6,29 +6,140 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#07050D" />
 
-    <!-- Это и есть заголовок, который видно во вкладке браузера и в результатах поиска -->
-    <title>DraftHex — контрпики и анализ драфта Dota 2</title>
-
-    <!-- Описание под заголовком в результатах поиска -->
+    <title>DraftHex — контрпики, драфт и статистика героев Dota 2</title>
     <meta
       name="description"
-      content="Контрпики, драфт 5×5, топ героев по ролям и рангам, справочник предметов и способностей. Реальная статистика OpenDota, без выдуманных советов."
+      content="Контрпики Dota 2 по реальной статистике: таблица матчапов, драфт 5×5 с оценкой перевеса, тренажёр Captain's Mode, топ героев по позициям и рангам, разбор матчей и справочник предметов."
     />
+    <meta name="robots" content="index, follow" />
+    <meta name="keywords" content="dota 2 контрпики, драфт дота, статистика героев dota, разбор матчей dota, captains mode тренажёр" />
 
-    <!-- Превью при отправке ссылки в Telegram, Discord и соцсети -->
     <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="DraftHex" />
     <meta property="og:title" content="DraftHex — контрпики и анализ драфта Dota 2" />
     <meta
       property="og:description"
-      content="Контрпики, драфт 5×5, топ героев по ролям и рангам. Реальная статистика OpenDota."
+      content="Контрпики, драфт 5×5, тренажёр Captain's Mode, топ героев по позициям и разбор матчей. Реальная статистика, без выдуманных советов."
     />
     <meta property="og:locale" content="ru_RU" />
+    <meta property="og:url" content="https://draft-hex-dota.ru/" />
     <meta name="twitter:card" content="summary_large_image" />
 
-    <link rel="canonical" href="https://vitejs-vite-5uw2fa4z.vercel.app/" />
+    <link rel="canonical" href="https://draft-hex-dota.ru/" />
+
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebApplication",
+        "name": "DraftHex",
+        "url": "https://draft-hex-dota.ru/",
+        "applicationCategory": "GameApplication",
+        "operatingSystem": "Любой браузер",
+        "inLanguage": "ru",
+        "description": "Сервис для анализа драфта Dota 2: контрпики, статистика героев по рангам, тренажёр Captain's Mode, разбор матчей игрока.",
+        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "RUB" }
+      }
+    </script>
   </head>
   <body>
-    <div id="root"></div>
+    <!--
+      Содержимое ниже видят поисковые роботы, которые не выполняют код страницы.
+      После запуска приложения оно заменяется живым интерфейсом. Текст описывает
+      ровно то, что на сайте есть на самом деле — иначе это считалось бы подменой
+      содержимого для роботов, за которую площадки штрафуют.
+    -->
+    <div id="root">
+      <main>
+        <h1>DraftHex — контрпики и анализ драфта Dota 2</h1>
+        <p>
+          DraftHex помогает разобраться в драфте Dota 2 на основе реальной статистики матчей,
+          а не общих советов. Все показатели берутся из открытых источников и обновляются
+          автоматически.
+        </p>
+
+        <h2>Таблица контрпиков</h2>
+        <p>
+          Для любого героя показывает, кто играет против него лучше всего и кого он сам
+          обыгрывает. Есть фильтр по минимальному числу совместных матчей, чтобы случайные
+          выборки не искажали картину, и переключение между обычными и профессиональными играми.
+        </p>
+
+        <h2>Карточка героя</h2>
+        <p>
+          Винрейт и число матчей по каждому рангу — от Рекрута до Титана, лучшие и худшие
+          матчапы, популярные предметы по стадиям игры и распределение побед по линиям.
+        </p>
+
+        <h2>Драфт 5×5</h2>
+        <p>
+          Составьте обе команды и увидите, на чьей стороне перевес и почему: какие пары героев
+          дали преимущество, а где слабое место. Отдельно показывается план на игру и
+          рекомендация следующего пика.
+        </p>
+
+        <h2>Тренажёр Captain's Mode</h2>
+        <p>
+          Полная последовательность банов и пиков против соперника: четырнадцать банов и десять
+          пиков по очереди. Можно играть с подсказками на каждом ходу или без них — тогда разбор
+          решений покажут в конце.
+        </p>
+
+        <h2>Топ героев по позициям и рангам</h2>
+        <p>
+          Лучшие герои на каждой позиции с первой по пятую, а также разбивка по рангам и
+          статистика банов профессиональной сцены.
+        </p>
+
+        <h2>Паутина контрпиков</h2>
+        <p>
+          Интерактивный граф связей между героями: видно, кто кого обыгрывает, целыми группами.
+          Холст можно двигать, приближать и искать конкретного героя.
+        </p>
+
+        <h2>Разбор матчей</h2>
+        <p>
+          История собственных игр после входа через Steam: составы, предметы, командные драки
+          с картой, преимущество по золоту и опыту поминутно, сравнение вашей игры с другими
+          матчами на том же герое.
+        </p>
+
+        <h2>Справочник и патчи</h2>
+        <p>
+          Описания способностей и предметов, а также история обновлений игры с текстами
+          изменений по героям и предметам.
+        </p>
+
+        <p>
+          DraftHex не связан с Valve Corporation. Dota 2 — товарный знак Valve Corporation.
+        </p>
+      </main>
+    </div>
+
+    <!-- Яндекс.Метрика: считает посещаемость. Номер счётчика 111334627 -->
+    <script type="text/javascript">
+      (function (m, e, t, r, i, k, a) {
+        m[i] = m[i] || function () { (m[i].a = m[i].a || []).push(arguments); };
+        m[i].l = 1 * new Date();
+        for (var j = 0; j < document.scripts.length; j++) {
+          if (document.scripts[j].src === r) return;
+        }
+        k = e.createElement(t);
+        a = e.getElementsByTagName(t)[0];
+        k.async = 1;
+        k.src = r;
+        a.parentNode.insertBefore(k, a);
+      })(window, document, 'script', 'https://mc.yandex.ru/metrika/tag.js', 'ym');
+
+      ym(111334627, 'init', {
+        ssr: true,
+        webvisor: true,
+        clickmap: true,
+        trackLinks: true,
+        accurateTrackBounce: true
+      });
+    </script>
+    <noscript><div><img src="https://mc.yandex.ru/watch/111334627" style="position:absolute; left:-9999px;" alt="" /></div></noscript>
+
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
